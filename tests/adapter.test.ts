@@ -12,6 +12,7 @@ test("real adapter sends bearer header, PCM binary, normalized results and empty
   const segments: Segment[] = [];
   let auth = "";
   let binary = false;
+  const errors: string[] = [];
   server.on("connection", (ws, req) => {
     auth = req.headers.authorization ?? "";
     ws.on("message", (raw, isBinary) => {
@@ -58,11 +59,13 @@ test("real adapter sends bearer header, PCM binary, normalized results and empty
         segment: (s) => segments.push(s),
         state() {},
         error(m) {
-          assert.fail(m);
+          errors.push(m);
         },
         usage() {},
       },
     );
+    assert.equal(stream.audio(Buffer.alloc(160002)), false);
+    assert.match(errors[0], /backlog/);
     assert.equal(stream.audio(Buffer.alloc(3200)), true);
     await new Promise<void>((resolve) => {
       const poll = setInterval(() => {

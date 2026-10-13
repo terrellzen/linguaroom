@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createApp } from "../apps/server/src/app.js";
 import type {
   SpeechProvider,
@@ -27,11 +30,12 @@ class MockProvider implements SpeechProvider {
     };
   }
 }
-async function fixture() {
+async function fixture(extraEnv: NodeJS.ProcessEnv = {}) {
   const provider = new MockProvider();
   const { app } = await createApp(provider, {
     HOST_PASSWORD: "test-password",
     LOG_LEVEL: "silent",
+    ...extraEnv,
   });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const address = app.server.address();
@@ -229,5 +233,82 @@ test("API noncanonical URLs never bypass authorization", async () => {
     }
   } finally {
     await app.close();
+  }
+});
+
+test("opt-in persistence saves transcript without key and authenticated deletion removes it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "linguaroom-storage-"));
+  const f = await fixture({ DATA_DIR: dir });
+  try {
+    const started = await f.app.inject({
+      method: "POST",
+      url: "/api/session",
+      headers: f.headers,
+      payload: { target: "en", key: "synthetic-storage-key", save: true },
+    });
+    const id = started.json().room.id;
+    f.provider.callbacks!.segment({
+      id: "stored",
+      revision: 1,
+      final: true,
+      original: "Hola",
+      translated: "",
+      sourceLanguage: "es",
+      targetLanguage: "en",
+      channel: "original",
+      startMs: 0,
+      endMs: 400,
+    });
+    await f.app.inject({
+      method: "POST",
+      url: "/api/stop",
+      headers: f.headers,
+      payload: {},
+    });
+    const stored = await readFile(join(dir, `${id}.json`), "utf8");
+    assert.match(stored, /Hola/);
+    assert.ok(!stored.includes("synthetic-storage-key"));
+    const removed = await f.app.inject({
+      method: "DELETE",
+      url: `/api/saved/${id}`,
+      headers: f.headers,
+    });
+    assert.equal(removed.statusCode, 200);
+    await assert.rejects(() => readFile(join(dir, `${id}.json`)));
+  } finally {
+    await f.app.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test("host WebSocket requires cookie and matching Origin; invalid viewer token is rejected", async () => {
+  const f = await fixture();
+  try {
+    for (const [path, origin, cookie] of [
+      ["/ws/host", f.origin, ""],
+      ["/ws/host", "http://foreign.example", f.cookie],
+      ["/ws/viewer?token=invalid", f.origin, ""],
+    ]) {
+      await new Promise<void>((resolve, reject) => {
+        const ws = new WebSocket(`${f.origin.replace("http", "ws")}${path}`, {
+          headers: { Origin: origin, Cookie: cookie },
+        });
+        const timer = setTimeout(() => {
+          ws.terminate();
+          reject(new Error("Handshake rejection timeout"));
+        }, 5000);
+        ws.once("open", () => {
+          clearTimeout(timer);
+          ws.close();
+          reject(new Error("Unauthorized socket accepted"));
+        });
+        ws.once("error", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    assert.equal(f.provider.connections, 0);
+  } finally {
+    await f.app.close();
   }
 });

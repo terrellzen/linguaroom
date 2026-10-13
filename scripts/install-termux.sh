@@ -6,7 +6,7 @@ command -v pkg >/dev/null || { echo 'Termux pkg is missing; install a supported 
 pkg install -y nodejs-lts git openssl-tool
 ROOT=${LINGUAROOM_DIR:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "$ROOT"
-node -e 'if(Number(process.versions.node.split(".")[0])<22)throw Error("Node 22 LTS or newer required; run pkg upgrade")'
+node -e 'if(Number(process.versions.node.split(".")[0])<22 || (Number(process.versions.node.split(".")[0])===22 && Number(process.versions.node.split(".")[1])<12))throw Error("Node 22 LTS or newer required; run pkg upgrade")'
 [[ -f package-lock.json ]] || { echo 'Clone the complete LinguaRoom repository including package-lock.json.' >&2; exit 1; }
 npm ci
 npm run build

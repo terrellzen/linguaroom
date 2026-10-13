@@ -6,7 +6,7 @@ export function exportTranscript(room: Snapshot, format: string): string {
     return segments
       .map(
         (s) =>
-          `${room.speakers[s.speakerId ?? ""] ?? s.speakerId ?? "Speaker"} [${s.sourceLanguage ?? room.target}] ${s.translated || s.original}`,
+          `${room.speakers[s.speakerId ?? ""] ?? s.speakerId ?? "Speaker"} [${s.channel === "translation" ? s.targetLanguage : (s.sourceLanguage ?? "unknown")}] ${s.translated || s.original}`,
       )
       .join("\n");
   if (format !== "srt") throw new Error("Unsupported format");

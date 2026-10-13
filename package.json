@@ -15,7 +15,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test:browser": "tsx tests/browser.smoke.ts"
+    "test:browser": "tsx tests/browser.smoke.ts",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

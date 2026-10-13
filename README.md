@@ -72,6 +72,9 @@ npm test
 npm run lint
 npm run format:check
 npm run build
+# Optional desktop browser smoke (synthetic microphone/provider):
+npx playwright install chromium
+npm run test:browser
 npm start
 ```
 
@@ -86,3 +89,5 @@ See [verification record](docs/VERIFICATION.md) for actual checks. Automated fix
 SRT exports contain original speech only, because Soniox translation tokens lack timestamps. Original/translation runs are not falsely paired. Start a new meeting before the 300-minute provider limit; the app warns and ends the stream at 295 minutes. Active captions are capped at 10,000 runs; export regularly for very long meetings.
 
 Documentation: [Architecture](docs/ARCHITECTURE.md), [Soniox](docs/SONIOX.md), [Security](docs/SECURITY.md), [Privacy](docs/PRIVACY.md), [HTTPS](docs/HTTPS.md), [Troubleshooting](docs/TROUBLESHOOTING.md), [Provider interface](docs/PROVIDER_INTERFACE.md), [Windows](docs/WINDOWS.md), [Linux](docs/LINUX.md), [macOS](docs/MACOS.md).
+
+Application source is MIT licensed. See [dependency license inventory](docs/DEPENDENCIES.md) and retain upstream notices when distributing.

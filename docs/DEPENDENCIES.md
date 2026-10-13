@@ -1,6 +1,6 @@
 # Dependency licenses
 
-Generated from the checked-in lockfile. Retain upstream notices/LICENSE files when distributing. Runtime and build tooling have separate obligations; the Node/container base image also includes its own notices. Soniox service use remains subject to its commercial terms. This inventory is not legal advice or a full binary distribution audit.
+Generated from the checked-in lockfile. Retain upstream notices/LICENSE files when distributing. Runtime and build tooling have separate obligations; the Node/container base image also includes its own notices. Soniox service use remains subject to its commercial terms. This inventory is not legal advice or a full binary distribution audit. Regenerate with `node scripts/dependency-notices.mjs`.
 
 | Package                                                           | Version | License       | Scope      |
 | ----------------------------------------------------------------- | ------- | ------------- | ---------- |
@@ -211,6 +211,8 @@ Generated from the checked-in lockfile. Retain upstream notices/LICENSE files wh
 | pino                                                              | 10.4.0  | MIT           | Runtime    |
 | pino-abstract-transport                                           | 3.0.0   | MIT           | Runtime    |
 | pino-std-serializers                                              | 7.1.0   | MIT           | Runtime    |
+| playwright                                                        | 1.64.0  | Apache-2.0    | Build/test |
+| playwright-core                                                   | 1.64.0  | Apache-2.0    | Build/test |
 | postcss                                                           | 8.5.30  | MIT           | Build/test |
 | prelude-ls                                                        | 1.2.1   | MIT           | Build/test |
 | prettier                                                          | 3.9.10  | MIT           | Build/test |

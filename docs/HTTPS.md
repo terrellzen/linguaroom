@@ -26,3 +26,5 @@ Platform-neutral alternative without OpenSSL/mkcert: obtain a certificate from a
 Reverse proxy: set TRUST_PROXY=true, PUBLIC_ORIGIN=https://your-hostname, and PROXY_ADDRESS to the exact proxy IP if not loopback. The proxy must forward Host, Origin, X-Forwarded-Proto=https and WebSocket upgrade headers, with appropriate timeout/body limits. Only trusted proxy addresses affect scheme detection. Keep the backend unreachable directly from untrusted clients. No TLS verification is disabled.
 
 In Compose, use container paths /app/certs/server.crt and /app/certs/server.key. Native Node/Termux uses actual filesystem paths. Rootless file ownership must allow the runtime user to read restrictive keys. See PODMAN.md. The container health check expects localhost as a SAN.
+
+For container health checks with a CA-issued certificate (including mkcert), mount the issuing root CA certificate and set `TLS_CA=/app/certs/root-ca.crt`. Self-signed testing defaults to trusting TLS_CERT. TLS_CA is a health-check trust input; it does not change browser trust.

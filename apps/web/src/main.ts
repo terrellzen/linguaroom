@@ -74,7 +74,11 @@ function render() {
   if (!viewer) {
     const active = room?.state === "connected" || room?.state === "connecting";
     el<HTMLButtonElement>("start").disabled = capturing;
-    el("start").textContent = active ? "Reconnect microphone" : "Start meeting";
+    el("start").textContent = capturing
+      ? "Microphone live"
+      : active
+        ? "Reconnect microphone"
+        : "Start meeting";
     el<HTMLButtonElement>("stop").disabled =
       !active && room?.state !== "disconnected";
     el<HTMLButtonElement>("pause").disabled = !capturing;

@@ -15,6 +15,7 @@ services:
       SONIOX_API_KEY: "${SONIOX_API_KEY:-}"
       TLS_CERT: "${TLS_CERT:-}"
       TLS_KEY: "${TLS_KEY:-}"
+      TLS_CA: "${TLS_CA:-}"
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
       TRUST_PROXY: "${TRUST_PROXY:-false}"
       PROXY_ADDRESS: "${PROXY_ADDRESS:-}"
@@ -27,7 +28,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "const h=process.env.TLS_CERT?require('node:https'):require('node:http');const fs=require('node:fs');h.get({host:'localhost',port:process.env.PORT||3000,path:'/api/health',...(process.env.TLS_CERT?{ca:fs.readFileSync(process.env.TLS_CERT)}:{})},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+          "const h=process.env.TLS_CERT?require('node:https'):require('node:http');const fs=require('node:fs');h.get({host:'localhost',port:process.env.PORT||3000,path:'/api/health',...(process.env.TLS_CERT?{ca:fs.readFileSync(process.env.TLS_CA||process.env.TLS_CERT)}:{})},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 5s

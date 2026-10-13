@@ -14,7 +14,11 @@ export const responseSchema = z.object({
   tokens: z.array(tokenSchema).max(20000).default([]),
   finished: z.boolean().optional(),
   error_code: z.number().optional(),
-  error_type: z.string().optional(),
+  error_type: z
+    .string()
+    .max(100)
+    .regex(/^[a-z0-9_]+$/)
+    .optional(),
   total_audio_proc_ms: z.number().optional(),
   final_audio_proc_ms: z.number().optional(),
 });

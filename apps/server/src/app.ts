@@ -101,10 +101,19 @@ export async function createApp(
       .header("X-Content-Type-Options", "nosniff")
       .header("Referrer-Policy", "no-referrer")
       .header("Cache-Control", "no-store");
-    const route=req.routeOptions.url;
-    const path=req.url.split('?')[0];
-    let decoded:string;try{decoded=decodeURIComponent(path);}catch{return reply.code(400).send({error:'Invalid URL'});}
-    if((decoded.startsWith('/api/')&&decoded!==path)||path.split('/').some(part=>part==='.'||part==='..'))return reply.code(400).send({error:'Noncanonical URL'});
+    const route = req.routeOptions.url;
+    const path = req.url.split("?")[0];
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(path);
+    } catch {
+      return reply.code(400).send({ error: "Invalid URL" });
+    }
+    if (
+      (decoded.startsWith("/api/") && decoded !== path) ||
+      path.split("/").some((part) => part === "." || part === "..")
+    )
+      return reply.code(400).send({ error: "Noncanonical URL" });
     if (route?.startsWith("/api/") && route !== "/api/health") {
       if (!secure(req))
         return reply.code(403).send({

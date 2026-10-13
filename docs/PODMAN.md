@@ -31,6 +31,6 @@ podman logs linguaroom
 podman stop -t 15 linguaroom
 ```
 
-Using `--format docker` preserves the Containerfile HEALTHCHECK. Compose has its own health check for OCI builds. Health checks trust the supplied certificate as a CA and validate localhost SAN; reverse-proxy health checks use local HTTP. They never disable verification. Include localhost in server certificate SANs for direct TLS health checks.
+Using `--format docker` preserves the Containerfile HEALTHCHECK. Compose has its own health check for OCI builds. Health checks trust TLS_CA (or the supplied certificate for self-signed tests) as a CA and validate localhost SAN; reverse-proxy health checks use local HTTP. They never disable verification. Include localhost in server certificate SANs for direct TLS health checks.
 
 Windows/macOS: initialize and start Podman Machine, verify VM port forwarding to the host, then verify host firewall access from another device. Publishing 0.0.0.0 inside the VM alone does not guarantee LAN reachability through host forwarding. If your Podman version only forwards localhost, configure supported host port forwarding or use a host TLS reverse proxy. See platform docs. Cross-platform LAN publishing has not been tested here.
