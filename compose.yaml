@@ -1,0 +1,45 @@
+services:
+  linguaroom:
+    build:
+      context: .
+      dockerfile: Containerfile
+    userns_mode: keep-id
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      BIND: "0.0.0.0"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      DATA_DIR: /app/data
+      HOST_PASSWORD: "${HOST_PASSWORD:-}"
+      SONIOX_API_KEY: "${SONIOX_API_KEY:-}"
+      TLS_CERT: "${TLS_CERT:-}"
+      TLS_KEY: "${TLS_KEY:-}"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
+      TRUST_PROXY: "${TRUST_PROXY:-false}"
+      PROXY_ADDRESS: "${PROXY_ADDRESS:-}"
+    volumes:
+      - transcripts:/app/data
+      - ./certs:/app/certs:ro,Z
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const h=process.env.TLS_CERT?require('node:https'):require('node:http');const fs=require('node:fs');h.get({host:'localhost',port:process.env.PORT||3000,path:'/api/health',...(process.env.TLS_CERT?{ca:fs.readFileSync(process.env.TLS_CERT)}:{})},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 15s
+volumes:
+  transcripts:
