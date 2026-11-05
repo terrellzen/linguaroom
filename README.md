@@ -52,7 +52,8 @@ Use a supported Termux distribution such as F-Droid or the official GitHub relea
 
 ```sh
 pkg install git
-# Clone your copy of this repository, then cd into it.
+git clone https://github.com/terrellzen/linguaroom.git
+cd linguaroom
 bash scripts/install-termux.sh
 bash scripts/start-termux.sh
 ```

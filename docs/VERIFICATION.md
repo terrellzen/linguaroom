@@ -27,3 +27,9 @@ The browser smoke test is optional (`npx playwright install chromium`, `npm run 
 Outstanding field tests: real Soniox key acceptance and translation quality; automatic language detection with actual mixed-language speech; one-at-a-time 15-participant diarization; actual latency distribution; multi-hour network interruption recovery; Android call/background/screen-lock behavior; trusted certificates on every client; Windows/macOS Machine port forwarding; ARM64 image execution. These are explicit verification limits, not claimed successes.
 
 Operational limitations: one active room per process; provider reconnect requires explicit stop/start to avoid duplicate paid connections; 295-minute controlled stream end; 10,000 retained caption runs and latest 300 rendered rows; optional saved transcripts are written on orderly stop/shutdown and speaker edits, not continuously crash-safe; API keys cannot be perfectly zeroized in JavaScript; a wake lock does not guarantee Android background lifetime.
+
+## Public-source release review — 2026-11-05
+
+Re-audited dependencies before making the repository public. Updated the lockfile to remediate the newly reported runtime advisories. The TypeScript ESLint parser's minimatch dependency has a scoped override to patched version 11.0.1 or later; lint and tests verify compatibility. Both full and production-only npm audits reported zero vulnerabilities after remediation. This is a point-in-time check, not a security guarantee.
+
+Reviewed tracked files and all existing Git history for recognized secret patterns and sensitive paths; none were found. Strengthened Git/container exclusions for environment variants and private-key formats. The public repository contains source, synthetic fixtures and configuration examples, not runtime credentials, local certificates or saved transcripts. Physical Android and live Soniox verification remain outstanding as described above.
