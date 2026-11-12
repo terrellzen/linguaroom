@@ -80,11 +80,13 @@ try {
   const page = await context.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto(origin);
+  await page.goto(`${origin}/?mode=server`);
   await page.locator("#password").fill("browser-test-host");
   await page.locator("#sign-in").click();
+  await page.locator("#setup-toggle").click();
   await page.locator("#controls").waitFor({ state: "visible" });
   await page.locator("#key").fill("synthetic-test-key");
+  await page.locator(".close-settings").click();
   await page.locator("#start").click();
   await page
     .getByText("Hello everyone. Welcome to our meeting.", { exact: true })
@@ -131,6 +133,210 @@ try {
     "Browser smoke passed: fake microphone AudioWorklet, PCM relay, captions, pause/resume, read-only viewer, mobile layout, stop; no Soniox call.",
   );
   await context.close();
+  const standaloneContext = await browser.newContext({
+    permissions: ["microphone"],
+    viewport: { width: 390, height: 844 },
+  });
+  await standaloneContext.routeWebSocket(
+    "wss://stt-rt.soniox.com/transcribe-websocket",
+    (ws) => {
+      let replied = false;
+      ws.onMessage((message) => {
+        if (message === "") {
+          ws.send(JSON.stringify({ finished: true }));
+          ws.close();
+        } else if (typeof message !== "string" && !replied) {
+          replied = true;
+          ws.send(
+            JSON.stringify({
+              tokens: [
+                {
+                  text: "Hello locally.",
+                  is_final: true,
+                  speaker: "1",
+                  language: "en",
+                  start_ms: 0,
+                  end_ms: 1000,
+                },
+                { text: "<end>", is_final: true },
+                {
+                  text: "Hola localmente.",
+                  is_final: true,
+                  speaker: "1",
+                  language: "es",
+                  translation_status: "translation",
+                },
+                { text: "<end>", is_final: true },
+              ],
+            }),
+          );
+        }
+      });
+    },
+  );
+  const device = await standaloneContext.newPage();
+  const standaloneErrors: string[] = [];
+  const apiRequests: string[] = [];
+  device.on("pageerror", (error) => standaloneErrors.push(error.message));
+  device.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/api/"))
+      apiRequests.push(request.url());
+  });
+  await device.goto(origin);
+  for (const viewport of [
+    { width: 568, height: 280 },
+    { width: 844, height: 390 },
+  ]) {
+    await device.setViewportSize(viewport);
+    assert.ok(
+      await device
+        .locator("#captions")
+        .evaluate((el) => el.scrollHeight <= el.clientHeight + 1),
+      "Idle landscape captions should not scroll",
+    );
+    await device.locator("#setup-toggle").click();
+    const settings = await device.locator("#controls").boundingBox();
+    assert.ok(
+      settings &&
+        settings.y >= 0 &&
+        settings.y + settings.height <= viewport.height,
+      "Settings dialog stays within landscape viewport",
+    );
+    await device.locator(".close-settings").click();
+  }
+  await device.setViewportSize({ width: 390, height: 844 });
+
+  assert.equal(await device.locator("#login").isVisible(), false);
+  await device.locator("#setup-toggle").click();
+  await device.locator("#key").fill("synthetic-personal-key");
+  await device.locator("#remember-key").check();
+  await device.reload();
+  await device.locator("#setup-toggle").click();
+  assert.equal(
+    await device.locator("#key").inputValue(),
+    "synthetic-personal-key",
+  );
+  await device.locator(".close-settings").click();
+  await device.locator("#start").click();
+  await device.getByText("Hola localmente.", { exact: true }).waitFor();
+  assert.equal(await device.locator("#controls").isVisible(), false);
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+    { width: 1440, height: 900 },
+  ]) {
+    await device.setViewportSize(viewport);
+    assert.equal(
+      await device.evaluate(
+        () =>
+          document.documentElement.scrollHeight <= innerHeight &&
+          document.documentElement.scrollWidth <= innerWidth,
+      ),
+      true,
+    );
+    const captions = await device.locator("#captions").boundingBox();
+    await device.screenshot({ path: `/tmp/linguaroom-${viewport.width}.png` });
+    assert.ok(
+      captions &&
+        captions.height > 40 &&
+        captions.y + captions.height <= viewport.height,
+    );
+  }
+  // The document can fit while nested captions still overflow unnecessarily.
+  // Check the short conversation itself, plus visible transport/export controls.
+  for (const viewport of [
+    { width: 844, height: 390 },
+    { width: 740, height: 360 },
+    { width: 667, height: 320 },
+    { width: 568, height: 280 },
+    { width: 932, height: 430 },
+  ]) {
+    await device.setViewportSize(viewport);
+    const fit = await device.evaluate(() => {
+      const captions = document.querySelector<HTMLElement>("#captions")!;
+      const visible = [
+        "header",
+        ".caption-tools",
+        "#exports",
+        ".transport",
+        "#captions",
+      ].every((selector) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect();
+        return (
+          rect.x >= 0 &&
+          rect.y >= 0 &&
+          rect.right <= innerWidth + 1 &&
+          rect.bottom <= innerHeight + 1
+        );
+      });
+      const transport = document
+        .querySelector(".transport")!
+        .getBoundingClientRect();
+      const exportsFit = Array.from(
+        document.querySelector("#exports")!.children,
+      ).every((child) => child.getBoundingClientRect().right < transport.left);
+      return {
+        visible,
+        exportsFit,
+        overflow: captions.scrollHeight - captions.clientHeight,
+        documentOverflow: document.documentElement.scrollHeight - innerHeight,
+      };
+    });
+    await device.screenshot({
+      path: `/tmp/linguaroom-landscape-${viewport.width}.png`,
+    });
+    assert.ok(
+      fit.visible,
+      `Controls outside landscape viewport ${JSON.stringify(viewport)}`,
+    );
+    assert.ok(
+      fit.overflow <= 1,
+      `Short captions scroll unnecessarily at ${JSON.stringify(viewport)}: ${JSON.stringify(fit)}`,
+    );
+    assert.ok(fit.documentOverflow <= 1);
+    assert.ok(
+      fit.exportsFit,
+      `Exports overlap meeting buttons at ${JSON.stringify(viewport)}`,
+    );
+  }
+  // Growing transcripts scroll inside their area; the bottom controls stay fixed.
+  await device.evaluate(() => {
+    const captions = document.querySelector("#captions")!;
+    const caption = captions.querySelector("article")!;
+    for (let i = 0; i < 30; i++) captions.append(caption.cloneNode(true));
+  });
+  assert.ok(
+    await device
+      .locator("#captions")
+      .evaluate((el) => el.scrollHeight > el.clientHeight),
+  );
+  const stopBounds = await device.locator("#stop").boundingBox();
+  assert.ok(stopBounds && stopBounds.y + stopBounds.height <= 430);
+  await device.evaluate(() => {
+    const captions = document.querySelector("#captions")!;
+    Array.from(captions.children)
+      .slice(2)
+      .forEach((child) => child.remove());
+  });
+  const download = device.waitForEvent("download");
+  await device.getByRole("link", { name: "TXT", exact: true }).click();
+  assert.equal((await download).suggestedFilename(), "linguaroom.txt");
+  await device.screenshot({ path: "/tmp/linguaroom-standalone-desktop.png" });
+  await device.setViewportSize({ width: 390, height: 844 });
+  await device.screenshot({ path: "/tmp/linguaroom-standalone-mobile.png" });
+  await device.locator("#stop").click();
+  await device.locator("#setup-toggle").click();
+  await device.locator("#clear-key").click();
+  assert.equal(
+    await device.evaluate(() => localStorage.getItem("linguaroom.soniox-key")),
+    null,
+  );
+  assert.deepEqual(apiRequests, []);
+  assert.deepEqual(standaloneErrors, []);
+  await standaloneContext.close();
+  console.log(
+    "Standalone smoke passed: direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+  );
 } finally {
   await browser.close();
   await app.close();

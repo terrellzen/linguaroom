@@ -16,7 +16,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:browser": "tsx tests/browser.smoke.ts",
-    "pretest": "npm run build"
+    "pretest": "npm run build",
+    "build:web": "vite build --config apps/web/vite.config.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

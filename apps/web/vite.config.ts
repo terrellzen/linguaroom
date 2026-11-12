@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 export default defineConfig({
+  base: "./",
   root: resolve("apps/web"),
   build: {
     assetsInlineLimit: 0,

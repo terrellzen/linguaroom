@@ -1,5 +1,9 @@
 # Privacy
 
+Standalone mode (the default, including GitHub Pages): microphone audio goes directly from the browser to Soniox. Captions stay in memory until downloaded; reload discards them. The optional Remember API key choice stores the user’s personal key in local storage for this site, accessible to scripts on the same origin. Uncheck Remember or use Clear key to remove it. No application backend is contacted. Use a trusted device and never embed a shared provider key in a deployment.
+
+The following describes optional Shared server mode:
+
 Audio is captured in the browser and sent through this installation to Soniox. The application is not offline; review Soniox's current service terms, retention and regional processing policies before meetings. Obtain participants' consent and follow applicable recording/transcription rules.
 
 Default: memory-only transcripts, no audio storage, no permanent browser credentials, no analytics, advertising, CDNs, fonts or third-party client services. One microphone does not guarantee recognition or separation of overlapping speech. API keys remain server-side for the active connection; optional SONIOX_API_KEY is a deployment secret.

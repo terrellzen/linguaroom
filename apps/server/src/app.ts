@@ -96,7 +96,7 @@ export async function createApp(
     reply
       .header(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' wss://stt-rt.soniox.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
       )
       .header("X-Content-Type-Options", "nosniff")
       .header("Referrer-Policy", "no-referrer")

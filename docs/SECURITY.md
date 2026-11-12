@@ -1,3 +1,9 @@
+# Standalone mode
+
+The default browser app connects directly to the fixed Soniox WSS endpoint using the user’s own key in WebSocket protocols. Remembering a key is opt-in browser local storage, not encrypted secret storage. The published site contains no provider credentials. Soniox recommends backend-issued temporary keys when distributing access to a developer-owned provider account; that is separate from this personal-key mode.
+
+Shared server configuration navigates to the configured server’s own interface over HTTPS (HTTP is permitted only for localhost). It does not forward the browser’s saved provider key. The existing host login and viewer tokens apply on that server; no cross-origin server authentication API has been added.
+
 # Security
 
 Host access uses a random startup login code or deployment HOST_PASSWORD. Startup code logging is intentional local bootstrap; Soniox keys are never logged. Host cookies are HttpOnly, SameSite=Strict, Secure on HTTPS and expire after 12 hours. POST/DELETE endpoints require the exact application Origin, and all administrative endpoints require authenticated host access. Only loopback clients with a localhost Host may use native development HTTP; remote administration and key submission require HTTPS.
