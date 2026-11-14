@@ -9,6 +9,7 @@ function setup({
   pendingActivation = false,
   pendingSuspend = false,
   pendingClose = false,
+  activationNeedsPermission = false,
 } = {}) {
   const events: string[] = [];
   const timers = new Set<() => void>();
@@ -16,6 +17,7 @@ function setup({
   let finishSuspend!: () => void;
   let grant!: (stream: unknown) => void;
   let contexts = 0;
+  let permissionGranted = false;
   const track = { stop: () => events.push("track stopped") };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
   let worklet: { port: { onmessage?: (event: unknown) => void } } | undefined;
@@ -32,6 +34,8 @@ function setup({
     };
     resume() {
       events.push("resume");
+      if (activationNeedsPermission && !permissionGranted)
+        return new Promise<void>(() => {});
       if (!pendingActivation) {
         this.state = "running";
         return Promise.resolve();
@@ -79,11 +83,15 @@ function setup({
       mediaDevices: {
         getUserMedia: () => {
           events.push("permission");
-          return pendingPermission
+          const requested = pendingPermission
             ? new Promise((resolve) => {
                 grant = resolve;
               })
             : Promise.resolve(stream);
+          return requested.then((result) => {
+            permissionGranted = true;
+            return result;
+          });
         },
       },
     },
@@ -152,10 +160,16 @@ test("activation still completes before loading the processor", async () => {
   const { mic, events, activate } = setup({ pendingActivation: true });
   const starting = mic.start("", ignore, ignore);
   for (let i = 0; i < 10; i++) await Promise.resolve();
-  assert.deepEqual(events, ["resume", "permission"]);
+  assert.deepEqual(events, ["resume", "permission", "resume"]);
   activate();
   await starting;
-  assert.deepEqual(events, ["resume", "permission", "module", "node"]);
+  assert.deepEqual(events, [
+    "resume",
+    "permission",
+    "resume",
+    "module",
+    "node",
+  ]);
   assert.equal(mic.diagnostics().peakLevel, 0.5);
   await mic.stop();
 });
@@ -184,7 +198,7 @@ test("permission timeout releases a late stream without replacing the engine", a
   [...timers].forEach((callback) => callback());
   await rejected;
   grant();
-  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.ok(events.includes("track stopped"));
   assert.equal(contexts(), 1);
   assert.equal(timers.size, 0);
@@ -210,4 +224,28 @@ test("disposal bounds a stalled browser close and clears page ownership", async 
   await disposing;
   assert.equal(mic.diagnostics().contextState, "closed");
   assert.equal(timers.size, 0);
+});
+
+test("first resume may stay pending until permission; the same Start succeeds", async () => {
+  const { mic, events, contexts, timers, grant } = setup({
+    activationNeedsPermission: true,
+    pendingPermission: true,
+  });
+  const started = mic.start("", ignore, ignore);
+  await Promise.resolve();
+  assert.deepEqual(events, ["resume", "permission"]);
+  grant();
+  await started;
+  assert.deepEqual(events, [
+    "resume",
+    "permission",
+    "resume",
+    "module",
+    "node",
+  ]);
+  assert.equal(contexts(), 1);
+  assert.equal(mic.diagnostics().startCount, 1);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(timers.size, 0);
+  await mic.stop();
 });

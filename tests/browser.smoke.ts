@@ -156,8 +156,30 @@ try {
   await standaloneContext.addInitScript(() => {
     const stats = window as typeof window & { audioContextCount: number };
     stats.audioContextCount = 0;
+    // Reproduce the phone's timeout-first pattern on every meeting: a resume
+    // made before capture permission stays pending forever.
+    let captureGranted = false;
+    const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
+      navigator.mediaDevices,
+    );
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      const stream = await getUserMedia(constraints);
+      captureGranted = true;
+      for (const track of stream.getTracks()) {
+        const stop = track.stop.bind(track);
+        track.stop = () => {
+          captureGranted = false;
+          stop();
+        };
+      }
+      return stream;
+    };
     const NativeContext = window.AudioContext;
     window.AudioContext = class extends NativeContext {
+      resume() {
+        if (!captureGranted) return new Promise<void>(() => {});
+        return super.resume();
+      }
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
         stats.audioContextCount++;
@@ -459,7 +481,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: Termux PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: pre-permission resume deliberately stalled, recovery on the same Start, PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();

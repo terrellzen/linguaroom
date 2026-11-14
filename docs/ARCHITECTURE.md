@@ -28,7 +28,7 @@ Persistence writes JSON on session stop, shutdown or speaker edits when enabled;
 
 ## Standalone browser capture
 
-The default standalone / GitHub Pages app sends the same 16 kHz, mono, signed 16-bit little-endian PCM as the server version, directly to Soniox. Its startup follows the user-verified Termux reference: create and resume the AudioContext during the Start gesture, acquire the microphone, await the original resume promise, then load and connect the AudioWorklet. It additionally waits for an actual PCM frame before connecting to Soniox. It does not use MediaRecorder or compressed container headers.
+The default standalone / GitHub Pages app sends the same 16 kHz, mono, signed 16-bit little-endian PCM as the server version, directly to Soniox. Its startup follows the user-verified Termux reference: create and resume the AudioContext during the Start gesture, acquire the microphone, call resume again after capture is granted, await that post-permission resume, then load and connect the AudioWorklet. The early resume is observed but not awaited because Firefox can leave it pending until a later call; no failed first attempt is required to issue that call. It additionally waits for an actual PCM frame before connecting to Soniox. It does not use MediaRecorder or compressed container headers.
 
 A connected standalone WebSocket initially displays “Waiting for audio”. The app displays “Live” only after Soniox reports processed audio or returns caption segments. Settings → Audio diagnostics distinguishes captured PCM chunks/bytes and input peak level from submitted chunks/bytes and Soniox processing progress. A health check reports stalled capture or missing processing confirmation without automatically opening another paid session.
 

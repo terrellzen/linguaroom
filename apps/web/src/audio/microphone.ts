@@ -57,12 +57,9 @@ export class Microphone {
       this.receivedBytes = 0;
       this.receivedChunks = 0;
       this.peakLevel = 0;
-      const ready = withTimeout(
-        this.context.resume(),
-        "Audio activation timed out. Keep this tab visible and retry.",
-        20000,
-      );
-      void ready.catch(() => {});
+      // Preserve the Start gesture, but do not wait on this pre-permission
+      // request: Firefox can leave it pending until resume is called again.
+      void this.context.resume().catch(() => {});
       progress("Waiting for microphone permission…");
       let acceptingStream = true;
       const requestedStream = navigator.mediaDevices
@@ -90,7 +87,13 @@ export class Microphone {
       // Match the working Termux version: do not load or construct a worklet
       // until the playback engine has finished starting.
       progress("Activating microphone audio…");
-      await ready;
+      // getUserMedia changes audio permission/routing on Android. Resume again
+      // now that capture is granted, before awaiting activation or loading nodes.
+      await withTimeout(
+        this.context.resume(),
+        "Audio activation timed out. Keep this tab visible and retry.",
+        20000,
+      );
       progress("Loading microphone audio processing…");
       if (!this.context.audioWorklet)
         throw new Error(
