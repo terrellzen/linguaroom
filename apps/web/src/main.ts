@@ -8,6 +8,7 @@ import {
   type RoomEvent,
 } from "../../../packages/shared/protocol";
 import { Microphone } from "./audio/microphone";
+import { microphoneTest } from "./audio/microphone-test";
 const viewer = location.pathname === "/viewer";
 const standalone =
   !viewer && new URLSearchParams(location.search).get("mode") !== "server";
@@ -19,6 +20,7 @@ let intentional = false;
 let paused = false;
 let capturing = false;
 let changingCapture = false;
+let testingMicrophone = false;
 let authenticated = false;
 const mic = new Microphone();
 const local = new StandaloneSession(
@@ -80,6 +82,20 @@ transport.prepend(liveHint);
 transport.hidden = viewer;
 document.querySelector(".captions-panel")!.append(transport);
 document.querySelector(".header-actions")!.prepend(setupToggle);
+const micTestPanel = document.createElement("details");
+micTestPanel.id = "microphone-test";
+settings
+  .querySelector("#devices")!
+  .insertAdjacentElement("afterend", micTestPanel);
+const micTest = microphoneTest(
+  micTestPanel,
+  () => capturing || changingCapture,
+  (active) => {
+    testingMicrophone = active;
+    render();
+  },
+  () => value("device"),
+);
 function el<T extends HTMLElement = HTMLElement>(id: string) {
   return document.getElementById(id) as T;
 }
@@ -98,6 +114,7 @@ function renderDiagnostics() {
       mode: standalone ? "standalone" : viewer ? "viewer" : "server",
       stage: document.getElementById("notice")?.textContent ?? "Idle",
       capture: mic.diagnostics(),
+      microphoneTest: micTest.diagnostics(),
       provider: room?.metrics ?? {},
     },
     null,
@@ -185,7 +202,8 @@ function render() {
   el("meeting-title").textContent = room?.name ?? "Ready when you are";
   if (!viewer) {
     const active = room?.state === "connected" || room?.state === "connecting";
-    el<HTMLButtonElement>("start").disabled = capturing || changingCapture;
+    el<HTMLButtonElement>("start").disabled =
+      capturing || changingCapture || testingMicrophone;
     el("start").textContent = capturing
       ? waitingForAudio
         ? "● Listening"
@@ -371,7 +389,8 @@ action("sign-in", async () => {
   notice("Host authenticated.");
 });
 action("start", async () => {
-  if (!authenticated || changingCapture || capturing) return;
+  if (!authenticated || changingCapture || capturing || testingMicrophone)
+    return;
   if (standalone && !value("key")) {
     settings.showModal();
     notice("Add your Soniox API key in Settings to begin.");
@@ -571,6 +590,7 @@ el<HTMLInputElement>("size").oninput = () =>
 el("original").onchange = render;
 el("labels").onchange = render;
 window.addEventListener("pagehide", () => {
+  micTest.stop();
   intentional = true;
   void mic.dispose();
   socket?.close();

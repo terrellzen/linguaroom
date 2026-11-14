@@ -165,7 +165,9 @@ try {
       (event) => {
         if (
           event.isTrusted &&
-          (event.target as HTMLElement)?.textContent === "Activate audio"
+          ["Activate audio", "2. Test audio processing"].includes(
+            (event.target as HTMLElement)?.textContent ?? "",
+          )
         )
           needsReset = false;
       },
@@ -306,6 +308,63 @@ try {
   assert.equal(initialDiagnostics.capture.contextState, "closed");
   assert.equal(initialDiagnostics.capture.startCount, 0);
   await device.locator("#setup-toggle").click();
+  await device.locator("#microphone-test summary").click();
+  for (const captureMode of ["default", "meeting"]) {
+    await device.locator("[data-mode]").selectOption(captureMode);
+    await device
+      .getByRole("button", { name: "1. Open microphone", exact: true })
+      .click();
+    await device
+      .getByText(
+        "Microphone opened. Speak, then tap 2. Test audio processing.",
+        { exact: true },
+      )
+      .waitFor();
+    assert.equal(
+      standaloneConnections,
+      0,
+      "Local mic test must not contact Soniox",
+    );
+    assert.equal(await device.locator("#start").isDisabled(), true);
+    const before = JSON.parse(
+      (await device.locator("[data-results]").textContent())!,
+    );
+    assert.equal(
+      before.contextState,
+      undefined,
+      "Capture test must not create an audio engine",
+    );
+    assert.equal(before.trackState, "live");
+    await device
+      .getByRole("button", { name: "2. Test audio processing", exact: true })
+      .click();
+    await device
+      .getByText("Audio engine running. Speak and check the input level.", {
+        exact: true,
+      })
+      .waitFor();
+    await device.waitForFunction(() => {
+      const probe = JSON.parse(
+        document.querySelector("[data-results]")!.textContent!,
+      );
+      return (
+        probe.nativeBytes > 0 &&
+        probe.peakLevel > 0 &&
+        probe.audioTimeSeconds > 0
+      );
+    });
+    await device
+      .getByRole("button", { name: "Stop test", exact: true })
+      .click();
+    assert.equal(await device.locator("#start").isEnabled(), true);
+    assert.ok(
+      (await device.locator("[data-results]").textContent())!.includes(
+        '"stopped": true',
+      ),
+    );
+  }
+  assert.equal(standaloneConnections, 0);
+  await device.locator("#microphone-test summary").click();
   await device.locator("#key").fill("synthetic-personal-key");
   await device.locator("#remember-key").check();
   await device.reload();
