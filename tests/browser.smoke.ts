@@ -1,7 +1,7 @@
-/** Optional desktop Chromium smoke test: synthetic microphone + normalized mock provider.
+/** Desktop Chromium/Firefox smoke test: synthetic microphone + normalized mock provider.
  * Install with npx playwright install chromium. Never establishes real AI accuracy. */
 import assert from "node:assert/strict";
-import { chromium } from "playwright";
+import { chromium, firefox } from "playwright";
 import { createApp } from "../apps/server/src/app.js";
 import type {
   SpeechProvider,
@@ -65,16 +65,26 @@ await app.listen({ host: "127.0.0.1", port: 0 });
 const address = app.server.address();
 assert.ok(address && typeof address !== "string");
 const origin = `http://127.0.0.1:${address.port}`;
-const browser = await chromium.launch({
-  headless: true,
-  args: [
-    "--use-fake-device-for-media-stream",
-    "--use-fake-ui-for-media-stream",
-  ],
-});
+const firefoxTest = process.argv.includes("--firefox");
+const browser = firefoxTest
+  ? await firefox.launch({
+      headless: true,
+      firefoxUserPrefs: {
+        "media.navigator.streams.fake": true,
+        "media.navigator.permission.disabled": true,
+        "media.autoplay.default": 0,
+      },
+    })
+  : await chromium.launch({
+      headless: true,
+      args: [
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream",
+      ],
+    });
 try {
   const context = await browser.newContext({
-    permissions: ["microphone"],
+    permissions: firefoxTest ? [] : ["microphone"],
     viewport: { width: 1440, height: 1100 },
   });
   const page = await context.newPage();
@@ -95,8 +105,13 @@ try {
   assert.equal(await page.locator("#key").inputValue(), "");
   assert.equal(provider.connections, 1);
   await page.locator("#pause").click();
-  assert.equal(await page.locator("#pause").textContent(), "Resume");
+  await page.waitForFunction(
+    () => document.querySelector("#pause")?.textContent === "Resume",
+  );
   await page.locator("#pause").click();
+  await page.waitForFunction(
+    () => document.querySelector("#pause")?.textContent === "Pause",
+  );
   const viewerUrl = await page.locator("#share").inputValue();
   const viewer = await context.newPage();
   await viewer.goto(viewerUrl);
@@ -134,18 +149,45 @@ try {
   );
   await context.close();
   const standaloneContext = await browser.newContext({
-    permissions: ["microphone"],
+    permissions: firefoxTest ? [] : ["microphone"],
     viewport: { width: 390, height: 844 },
   });
+  // Direct capture must work with Web Audio completely unavailable.
+  await standaloneContext.addInitScript(() => {
+    window.AudioContext = class {
+      constructor() {
+        throw new Error("Standalone capture must not open playback audio");
+      }
+    } as unknown as typeof AudioContext;
+  });
+  let standaloneConnections = 0;
   await standaloneContext.routeWebSocket(
     "wss://stt-rt.soniox.com/transcribe-websocket",
     (ws) => {
+      standaloneConnections++;
       let replied = false;
+      let configured = false;
       ws.onMessage((message) => {
         if (message === "") {
           ws.send(JSON.stringify({ finished: true }));
           ws.close();
-        } else if (typeof message !== "string" && !replied) {
+        } else if (typeof message === "string") {
+          const config = JSON.parse(message);
+          if (config.type === "keepalive") return;
+          assert.equal(config.audio_format, "auto");
+          assert.equal(config.sample_rate, undefined);
+          assert.equal(config.num_channels, undefined);
+          configured = true;
+        } else if (!replied) {
+          assert.ok(
+            configured,
+            "Provider must receive configuration before encoded audio",
+          );
+          const header = Buffer.from(message).subarray(0, 4).toString("hex");
+          assert.ok(
+            ["1a45dfa3", "4f676753"].includes(header),
+            "First chunk must contain a WebM or Ogg header",
+          );
           replied = true;
           ws.send(
             JSON.stringify({
@@ -290,7 +332,7 @@ try {
       `Controls outside landscape viewport ${JSON.stringify(viewport)}`,
     );
     assert.ok(
-      fit.overflow <= 1,
+      fit.overflow <= (firefoxTest ? 2 : 1),
       `Short captions scroll unnecessarily at ${JSON.stringify(viewport)}: ${JSON.stringify(fit)}`,
     );
     assert.ok(fit.documentOverflow <= 1);
@@ -324,7 +366,37 @@ try {
   await device.screenshot({ path: "/tmp/linguaroom-standalone-desktop.png" });
   await device.setViewportSize({ width: 390, height: 844 });
   await device.screenshot({ path: "/tmp/linguaroom-standalone-mobile.png" });
+  await device.locator("#pause").click();
+  await device.waitForFunction(
+    () => document.querySelector("#pause")?.textContent === "Resume",
+  );
+  await device.locator("#pause").click();
+  await device.waitForFunction(
+    () => document.querySelector("#pause")?.textContent === "Pause",
+  );
   await device.locator("#stop").click();
+  await device
+    .getByText("Meeting ended. Export your transcript before closing.", {
+      exact: true,
+    })
+    .waitFor();
+  for (const reload of [false, true]) {
+    if (reload) await device.reload();
+    await device.locator("#start").click();
+    await device
+      .getByText("Meeting live. Audio is being processed by Soniox.", {
+        exact: true,
+      })
+      .waitFor();
+    await device.getByText("Hola localmente.", { exact: true }).waitFor();
+    await device.locator("#stop").click();
+    await device
+      .getByText("Meeting ended. Export your transcript before closing.", {
+        exact: true,
+      })
+      .waitFor();
+  }
+  assert.equal(standaloneConnections, 3);
   await device.locator("#setup-toggle").click();
   await device.locator("#clear-key").click();
   assert.equal(
@@ -335,7 +407,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: native encoded audio with Web Audio disabled, container headers, pause/resume, repeated start/stop and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();

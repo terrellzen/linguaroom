@@ -18,7 +18,7 @@ export class StandaloneSession {
   private publish() {
     if (this.room) this.update(this.room);
   }
-  async start(options: Start) {
+  async start(options: Start, audioFormat: "auto" | "pcm_s16le" = "auto") {
     if (this.socket) throw new Error("Stop the current session first.");
     if (!options.key) throw new Error("Enter your Soniox API key.");
     const ws = new WebSocket("wss://stt-rt.soniox.com/transcribe-websocket", [
@@ -50,9 +50,10 @@ export class StandaloneSession {
         ws.send(
           JSON.stringify({
             model: "stt-rt-v5",
-            audio_format: "pcm_s16le",
-            sample_rate: 16000,
-            num_channels: 1,
+            audio_format: audioFormat,
+            ...(audioFormat === "pcm_s16le"
+              ? { sample_rate: 16000, num_channels: 1 }
+              : {}),
             enable_language_identification: true,
             enable_speaker_diarization: options.diarization,
             enable_endpoint_detection: options.endpoint,
@@ -122,17 +123,27 @@ export class StandaloneSession {
     });
     return { room };
   }
-  audio(pcm: ArrayBuffer) {
+  audio(pcm: ArrayBuffer | Blob) {
     if (
+      this.room?.state === "connected" &&
       this.socket?.readyState === WebSocket.OPEN &&
-      this.socket.bufferedAmount < 32000
+      this.socket.bufferedAmount +
+        (pcm instanceof Blob ? pcm.size : pcm.byteLength) <=
+        128000
     )
       this.socket.send(pcm);
-    else this.notice("Audio connection unavailable or behind; audio dropped.");
+    else {
+      // Encoded containers must arrive intact, including their first header.
+      // Stop instead of dropping arbitrary chunks and continuing a broken stream.
+      this.notice(
+        "Audio connection unavailable or behind. Restart the meeting.",
+      );
+      void this.stop();
+    }
   }
   async stop() {
     const ws = this.socket;
-    if (!ws) return;
+    if (!ws || this.room?.state === "ending") return;
     if (this.room) this.room.state = "ending";
     clearInterval(this.keepalive);
     clearTimeout(this.limit);

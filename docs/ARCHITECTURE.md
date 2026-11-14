@@ -25,3 +25,9 @@ Events include schemaVersion, sessionId, eventId, timestamp, providerId and a re
 Metrics measure local elapsed time from the first submitted audio to the first result/final result, provider processed audio offsets, queued bytes, submitted/dropped bytes, update count, memory and uptime. These do not establish exact speech-to-subtitle latency across devices. Targets of first captions around 2s and p95 below 4s are goals requiring measurement under real conditions.
 
 Persistence writes JSON on session stop, shutdown or speaker edits when enabled; it is not crash-safe continuous recording. Saved sessions are accessible only through host APIs. Audio is never written to disk.
+
+## Standalone browser capture
+
+The default standalone / GitHub Pages app captures with `MediaRecorder`, choosing supported Opus-in-WebM or Opus-in-Ogg, and sends that container stream directly to Soniox with `audio_format: "auto"`. It does not create an `AudioContext`, start a playback device, load an AudioWorklet, or resample PCM. This avoids making microphone capture depend on the playback audio engine on Android Firefox. Browsers without a supported native Opus container, and server mode, retain the PCM path above.
+
+Native capture waits for its first nonempty chunk before connecting to Soniox. It holds up to 128 KB while the socket connects, preserving the container header and chunk order. Once connected it flushes those chunks and streams subsequent chunks as Blobs without conversion. Pause/resume uses the same recorder and container. Stop flushes the final chunk before ending the provider stream; each new meeting starts a fresh container. A backed-up or missing provider connection ends the session instead of dropping container chunks and continuing with a corrupted stream. Native recording does not expose PCM amplitude, so the input level meter is hidden in standalone mode.

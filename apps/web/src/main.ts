@@ -8,6 +8,7 @@ import {
   type RoomEvent,
 } from "../../../packages/shared/protocol";
 import { Microphone } from "./audio/microphone";
+import { RecorderMicrophone } from "./audio/recorder-microphone";
 const viewer = location.pathname === "/viewer";
 const standalone =
   !viewer && new URLSearchParams(location.search).get("mode") !== "server";
@@ -20,7 +21,10 @@ let paused = false;
 let capturing = false;
 let changingCapture = false;
 let authenticated = false;
-const mic = new Microphone();
+const mic =
+  standalone && RecorderMicrophone.supportedMimeType()
+    ? new RecorderMicrophone()
+    : new Microphone();
 const local = new StandaloneSession(
   (snapshot) => {
     room = snapshot;
@@ -89,7 +93,11 @@ async function api(
   method = body === undefined ? "GET" : "POST",
 ) {
   if (standalone) {
-    if (path === "session") return local.start(startSchema.parse(body));
+    if (path === "session")
+      return local.start(
+        startSchema.parse(body),
+        mic instanceof RecorderMicrophone ? "auto" : "pcm_s16le",
+      );
     if (path === "stop") {
       await local.stop();
       return {};
@@ -356,11 +364,12 @@ action("start", async () => {
       value("device"),
       (pcm, level) => {
         el<HTMLMeterElement>("meter").value = Math.min(1, level * 5);
-        if (paused || !capturing) return;
+        if (!capturing) return;
         if (standalone) {
           local.audio(pcm);
           return;
         }
+        if (paused) return;
         if (
           socket?.readyState === WebSocket.OPEN &&
           socket.bufferedAmount < 32000
@@ -378,6 +387,7 @@ action("start", async () => {
         : await api("session", options());
     room = data.room;
     capturing = true;
+    if (mic instanceof RecorderMicrophone) mic.commit();
     settings.close();
     if (!standalone) el<HTMLInputElement>("key").value = "";
     if (!standalone)
@@ -419,8 +429,8 @@ action("stop", async () => {
   changingCapture = true;
   render();
   try {
-    capturing = false;
     await mic.stop();
+    capturing = false;
     await api("stop", {});
     el<HTMLButtonElement>("start").disabled = false;
     el<HTMLButtonElement>("pause").disabled = true;
@@ -539,6 +549,8 @@ if (viewer) {
     );
   else connect();
 } else if (standalone) {
+  // Native recording does not expose PCM levels; do not show a false zero meter.
+  el("meter").closest("label")!.hidden = mic instanceof RecorderMicrophone;
   authenticated = true;
   el("login").hidden = true;
   el("controls").hidden = false;
