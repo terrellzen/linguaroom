@@ -40,12 +40,9 @@ export class Microphone {
       // Activate audio synchronously during the Start button gesture, before
       // permission prompts or worklet loading can consume user activation.
       this.context = new AudioContext();
-      const activated = withTimeout(
-        this.context.resume(),
-        "Audio could not start. Allow audio playback in Firefox and tap Start meeting again.",
-      );
-      // Observe rejection while the permission prompt is still pending.
-      void activated.catch(() => {});
+      // Firefox can leave a resume promise pending even after the graph starts.
+      // Observe it, but verify startup using actual worklet frames below.
+      void this.context.resume().catch(() => {});
       let acceptingStream = true;
       const requestedStream = navigator.mediaDevices
         .getUserMedia({
@@ -79,7 +76,14 @@ export class Microphone {
         "Microphone audio processing could not load. Reload the page and try again.",
       );
       this.node = new AudioWorkletNode(this.context, "pcm-processor");
-      this.node.port.onmessage = (e) => send(e.data.pcm, e.data.level);
+      let receivedAudio!: () => void;
+      const firstFrame = new Promise<void>((resolve) => {
+        receivedAudio = resolve;
+      });
+      this.node.port.onmessage = (e) => {
+        receivedAudio();
+        send(e.data.pcm, e.data.level);
+      };
       this.source = this.context.createMediaStreamSource(this.stream);
       this.source.connect(this.node);
       const mute = this.context.createGain();
@@ -95,7 +99,13 @@ export class Microphone {
           onInterrupt("Audio capture suspended by browser. Resume capture.");
       };
       progress("Activating microphone audio…");
-      await activated;
+      // Opening the Android input device can interrupt an earlier resume.
+      // Resume again after connecting the input; only PCM proves capture works.
+      void this.context.resume().catch(() => {});
+      await withTimeout(
+        firstFrame,
+        "Microphone opened, but Firefox did not deliver audio. Keep this tab visible, stop other audio or calls, then retry. If it persists, fully close and reopen Firefox.",
+      );
     } catch (error) {
       await this.stop();
       throw error;

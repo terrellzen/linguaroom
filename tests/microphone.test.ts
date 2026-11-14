@@ -8,6 +8,7 @@ function setup(
   pendingPermission = false,
   pendingActivation = false,
   pendingClose = false,
+  deliversAudio = !pendingActivation,
 ) {
   const events: string[] = [];
   const timers = new Set<() => void>();
@@ -15,12 +16,17 @@ function setup(
   let grant!: (stream: unknown) => void;
   const track = { stop: () => events.push("stop") };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
+  let worklet: { port: { onmessage?: (event: unknown) => void } } | undefined;
   const connection = { connect: () => connection, disconnect() {} };
   class Context {
     state = "running";
     audioWorklet = { addModule: async () => {} };
     resume() {
       events.push("resume");
+      if (deliversAudio)
+        worklet?.port.onmessage?.({
+          data: { pcm: new ArrayBuffer(3200), level: 0 },
+        });
       return pendingActivation ? new Promise(() => {}) : Promise.resolve();
     }
     createMediaStreamSource() {
@@ -58,6 +64,9 @@ function setup(
     AudioContext: Context,
     AudioWorkletNode: class {
       port = {};
+      constructor() {
+        worklet = { port: this.port };
+      }
       connect = connection.connect;
       disconnect() {}
     },
@@ -89,10 +98,10 @@ test("microphone activates audio before awaiting permission and cleans up", asyn
     () => {},
     () => {},
   );
-  assert.deepEqual(events, ["resume", "permission"]);
+  assert.deepEqual(events, ["resume", "permission", "resume"]);
   assert.equal(timers.size, 0);
   await mic.stop();
-  assert.deepEqual(events.slice(2), ["stop", "close"]);
+  assert.deepEqual(events.slice(3), ["stop", "close"]);
 });
 
 test("permission timeout releases a microphone granted after the failed attempt", async () => {
@@ -119,7 +128,7 @@ test("blocked audio activation fails with retry guidance and releases capture", 
     () => {},
     () => {},
   );
-  const rejected = assert.rejects(started, /Allow audio playback/);
+  const rejected = assert.rejects(started, /Firefox did not deliver audio/);
   for (let i = 0; i < 10; i++) await Promise.resolve();
   [...timers].forEach((callback) => callback());
   await rejected;
@@ -167,4 +176,18 @@ test("cleanup completes even when the browser never resolves close", async () =>
   [...timers].forEach((callback) => callback());
   await closingAgain;
   assert.equal(timers.size, 0);
+});
+
+test("capture succeeds when Firefox delivers PCM but never resolves resume", async () => {
+  const { mic, timers } = setup(false, true, false, true);
+  const frames: ArrayBuffer[] = [];
+  await mic.start(
+    "",
+    (pcm: ArrayBuffer) => frames.push(pcm),
+    () => {},
+  );
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].byteLength, 3200);
+  assert.equal(timers.size, 0);
+  await mic.stop();
 });
