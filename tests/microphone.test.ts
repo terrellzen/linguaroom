@@ -6,10 +6,12 @@ import ts from "typescript";
 
 function setup({
   pendingPermission = false,
+  permissionDenied = false,
   pendingActivation = false,
   pendingSuspend = false,
   pendingClose = false,
   activationNeedsPermission = false,
+  activationNeedsReset = false,
 } = {}) {
   const events: string[] = [];
   const timers = new Set<() => void>();
@@ -18,7 +20,13 @@ function setup({
   let grant!: (stream: unknown) => void;
   let contexts = 0;
   let permissionGranted = false;
-  const track = { stop: () => events.push("track stopped") };
+  let inputReset = false;
+  const track = {
+    stop: () => {
+      events.push("track stopped");
+      inputReset = true;
+    },
+  };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
   let worklet: { port: { onmessage?: (event: unknown) => void } } | undefined;
   const connection = { connect: () => connection, disconnect() {} };
@@ -34,6 +42,8 @@ function setup({
     };
     resume() {
       events.push("resume");
+      if (activationNeedsReset && !inputReset)
+        return new Promise<void>(() => {});
       if (activationNeedsPermission && !permissionGranted)
         return new Promise<void>(() => {});
       if (!pendingActivation) {
@@ -83,6 +93,8 @@ function setup({
       mediaDevices: {
         getUserMedia: () => {
           events.push("permission");
+          if (permissionDenied)
+            return Promise.reject(new Error("Permission denied"));
           const requested = pendingPermission
             ? new Promise((resolve) => {
                 grant = resolve;
@@ -209,9 +221,13 @@ test("blocked activation releases capture and reports the timeout", async () => 
   const started = mic.start("", ignore, ignore);
   const rejected = assert.rejects(started, /Audio activation timed out/);
   for (let i = 0; i < 10; i++) await Promise.resolve();
-  [...timers].forEach((callback) => callback());
+  for (let i = 0; i < 3; i++) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    [...timers].forEach((callback) => callback());
+  }
   await rejected;
   assert.ok(events.includes("track stopped"));
+  assert.equal(events.filter((event) => event === "permission").length, 2);
   assert.equal(events.includes("module"), false);
 });
 
@@ -248,4 +264,32 @@ test("first resume may stay pending until permission; the same Start succeeds", 
   assert.equal(mic.diagnostics().receivedChunks, 1);
   assert.equal(timers.size, 0);
   await mic.stop();
+});
+
+test("a device needing failed-start cleanup recovers inside a single Start", async () => {
+  const { mic, events, contexts, timers } = setup({
+    activationNeedsReset: true,
+  });
+  const started = mic.start("", ignore, ignore);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(events.includes("node"), false);
+  [...timers].forEach((callback) => callback());
+  await started;
+  assert.equal(events.filter((event) => event === "permission").length, 2);
+  assert.equal(events.filter((event) => event === "node").length, 1);
+  assert.equal(mic.diagnostics().activationResets, 1);
+  assert.equal(mic.diagnostics().startCount, 1);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(contexts(), 1);
+  assert.equal(timers.size, 0);
+  await mic.stop();
+});
+
+test("permission denial does not trigger another capture request", async () => {
+  const { mic, events, timers } = setup({ permissionDenied: true });
+  await assert.rejects(mic.start("", ignore, ignore), /Permission denied/);
+  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(mic.diagnostics().activationResets, 0);
+  assert.equal(timers.size, 0);
 });

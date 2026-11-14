@@ -156,9 +156,11 @@ try {
   await standaloneContext.addInitScript(() => {
     const stats = window as typeof window & { audioContextCount: number };
     stats.audioContextCount = 0;
-    // Reproduce the phone's timeout-first pattern on every meeting: a resume
-    // made before capture permission stays pending forever.
+    // Model the phone report: every meeting needs a full input reset before
+    // activation can succeed, not just another resume after permission.
     let captureGranted = false;
+    let needsReset = true;
+    let stalledActivation = false;
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
       navigator.mediaDevices,
     );
@@ -169,6 +171,7 @@ try {
         const stop = track.stop.bind(track);
         track.stop = () => {
           captureGranted = false;
+          needsReset = true;
           stop();
         };
       }
@@ -177,8 +180,16 @@ try {
     const NativeContext = window.AudioContext;
     window.AudioContext = class extends NativeContext {
       resume() {
-        if (!captureGranted) return new Promise<void>(() => {});
+        if (needsReset) stalledActivation = true;
+        if (!captureGranted || needsReset) return new Promise<void>(() => {});
         return super.resume();
+      }
+      suspend() {
+        if (stalledActivation) {
+          needsReset = false;
+          stalledActivation = false;
+        }
+        return super.suspend();
       }
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
@@ -323,6 +334,8 @@ try {
     (await device.locator("#diagnostics").textContent()) ?? "{}",
   );
   assert.ok(diagnostics.capture.receivedChunks > 0);
+  assert.equal(diagnostics.capture.activationResets, 1);
+  assert.equal(diagnostics.capture.startCount, 1);
   assert.ok(diagnostics.provider.audioBytesSent > 0);
   assert.equal(diagnostics.provider.processedAudioMs, 1000);
   await device.locator(".close-settings").click();
@@ -454,6 +467,14 @@ try {
       })
       .waitFor();
     await device.getByText("Hola localmente.", { exact: true }).waitFor();
+    const recovered = JSON.parse(
+      (await device.locator("#diagnostics").textContent()) ?? "{}",
+    );
+    assert.equal(
+      recovered.capture.activationResets,
+      recovered.capture.startCount,
+      "Each user Start must recover internally without a second click",
+    );
     assert.equal(
       await device.evaluate(
         () =>
@@ -481,7 +502,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: pre-permission resume deliberately stalled, recovery on the same Start, PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: activation deliberately stalled until input reset, bounded recovery on the same Start, PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();

@@ -2,7 +2,7 @@ import workletUrl from "./pcm-worklet.js?url";
 // Browser permission and audio activation promises can remain pending indefinitely.
 async function withTimeout<T>(
   promise: Promise<T>,
-  message: string,
+  message: string | Error,
   timeoutMs = 30000,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -10,13 +10,19 @@ async function withTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = setTimeout(
+          () =>
+            reject(typeof message === "string" ? new Error(message) : message),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {
     clearTimeout(timer);
   }
 }
+
+class AudioActivationTimeout extends Error {}
 
 export class Microphone {
   private context?: AudioContext;
@@ -26,6 +32,7 @@ export class Microphone {
   private mute?: GainNode;
   private contextCount = 0;
   private startCount = 0;
+  private activationResets = 0;
   private stream?: MediaStream;
   private node?: AudioWorkletNode;
   private source?: MediaStreamAudioSourceNode;
@@ -47,109 +54,144 @@ export class Microphone {
     this.starting = true;
     this.startCount++;
     try {
-      // Activate audio synchronously during the Start button gesture, before
-      // permission prompts or worklet loading can consume user activation.
-      if (!this.context || this.context.state === "closed") {
-        this.context = new AudioContext();
-        this.module = undefined;
-        this.contextCount++;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          await this.startCapture(
+            deviceId,
+            send,
+            onInterrupt,
+            progress,
+            attempt === 0 ? 3000 : 20000,
+          );
+          return;
+        } catch (error) {
+          await this.stop();
+          if (!(error instanceof AudioActivationTimeout) || attempt !== 0)
+            throw error;
+          this.activationResets++;
+          progress("Resetting stalled microphone audio…");
+          // A repeat resume alone is insufficient on some Android devices.
+          // Reproduce the useful part of failed-start cleanup before acquiring
+          // a fresh input. No provider connection has been opened yet.
+          if (this.context && this.context.state !== "closed")
+            await withTimeout(
+              this.context.suspend(),
+              "Audio reset timed out.",
+              2000,
+            );
+        }
       }
-      this.receivedBytes = 0;
-      this.receivedChunks = 0;
-      this.peakLevel = 0;
-      // Preserve the Start gesture, but do not wait on this pre-permission
-      // request: Firefox can leave it pending until resume is called again.
-      void this.context.resume().catch(() => {});
-      progress("Waiting for microphone permission…");
-      let acceptingStream = true;
-      const requestedStream = navigator.mediaDevices
-        .getUserMedia({
-          audio: {
-            deviceId: deviceId ? { exact: deviceId } : undefined,
-            channelCount: 1,
-            echoCancellation: true,
-            noiseSuppression: true,
-          },
-        })
-        .then((stream) => {
-          if (!acceptingStream)
-            stream.getTracks().forEach((track) => track.stop());
-          return stream;
-        });
-      try {
-        this.stream = await withTimeout(
-          requestedStream,
-          "Microphone permission timed out. Allow microphone access in Firefox and Android settings, then tap Start meeting again.",
-        );
-      } finally {
-        acceptingStream = false;
-      }
-      // Match the working Termux version: do not load or construct a worklet
-      // until the playback engine has finished starting.
-      progress("Activating microphone audio…");
-      // getUserMedia changes audio permission/routing on Android. Resume again
-      // now that capture is granted, before awaiting activation or loading nodes.
-      await withTimeout(
-        this.context.resume(),
-        "Audio activation timed out. Keep this tab visible and retry.",
-        20000,
-      );
-      progress("Loading microphone audio processing…");
-      if (!this.context.audioWorklet)
-        throw new Error(
-          "This browser requires AudioWorklet support; use current Chrome, Firefox, or Safari.",
-        );
-      if (!this.module) {
-        const loading = this.context.audioWorklet.addModule(workletUrl);
-        this.module = loading;
-        void loading.catch(() => {
-          if (this.module === loading) this.module = undefined;
-        });
-      }
-      await withTimeout(
-        this.module,
-        "Microphone audio processing could not load. Reload the page and try again.",
-      );
-      this.node = new AudioWorkletNode(this.context, "pcm-processor");
-      let receivedAudio!: () => void;
-      const firstFrame = new Promise<void>((resolve) => {
-        receivedAudio = resolve;
-      });
-      this.node.port.onmessage = (e) => {
-        this.receivedBytes += e.data.pcm.byteLength;
-        this.receivedChunks++;
-        this.peakLevel = Math.max(this.peakLevel, e.data.level);
-        receivedAudio();
-        send(e.data.pcm, e.data.level);
-      };
-      this.source = this.context.createMediaStreamSource(this.stream);
-      this.source.connect(this.node);
-      const mute = this.context.createGain();
-      this.mute = mute;
-      mute.gain.value = 0;
-      this.node.connect(mute).connect(this.context.destination);
-      this.stream.getAudioTracks().forEach((t) => {
-        t.onended = () => onInterrupt("Microphone ended. Restart capture.");
-        t.onmute = () =>
-          onInterrupt("Microphone interrupted; audio may be lost.");
-      });
-      this.context.onstatechange = () => {
-        if (this.context?.state === "suspended")
-          onInterrupt("Audio capture suspended by browser. Resume capture.");
-      };
-      if (this.context.state !== "running")
-        throw new Error("Audio is suspended. Keep this tab visible and retry.");
-      progress("Waiting for microphone samples…");
-      await withTimeout(
-        firstFrame,
-        "Microphone opened, but Firefox did not deliver audio. Keep this tab visible, stop other audio or calls, then retry. If it persists, fully close and reopen Firefox.",
-      );
-    } catch (error) {
-      await this.stop();
-      throw error;
     } finally {
       this.starting = false;
     }
+  }
+
+  private async startCapture(
+    deviceId: string,
+    send: (pcm: ArrayBuffer, level: number) => void,
+    onInterrupt: (message: string) => void,
+    progress: (message: string) => void,
+    activationTimeoutMs: number,
+  ) {
+    // Activate audio synchronously during the Start button gesture, before
+    // permission prompts or worklet loading can consume user activation.
+    if (!this.context || this.context.state === "closed") {
+      this.context = new AudioContext();
+      this.module = undefined;
+      this.contextCount++;
+    }
+    this.receivedBytes = 0;
+    this.receivedChunks = 0;
+    this.peakLevel = 0;
+    // Preserve the Start gesture, but do not wait on this pre-permission
+    // request: Firefox can leave it pending until resume is called again.
+    void this.context.resume().catch(() => {});
+    progress("Waiting for microphone permission…");
+    let acceptingStream = true;
+    const requestedStream = navigator.mediaDevices
+      .getUserMedia({
+        audio: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      })
+      .then((stream) => {
+        if (!acceptingStream)
+          stream.getTracks().forEach((track) => track.stop());
+        return stream;
+      });
+    try {
+      this.stream = await withTimeout(
+        requestedStream,
+        "Microphone permission timed out. Allow microphone access in Firefox and Android settings, then tap Start meeting again.",
+      );
+    } finally {
+      acceptingStream = false;
+    }
+    // Match the working Termux version: do not load or construct a worklet
+    // until the playback engine has finished starting.
+    progress("Activating microphone audio…");
+    // getUserMedia changes audio permission/routing on Android. Resume again
+    // now that capture is granted, before awaiting activation or loading nodes.
+    await withTimeout(
+      this.context.resume(),
+      new AudioActivationTimeout(
+        "Audio activation timed out. Keep this tab visible and retry.",
+      ),
+      activationTimeoutMs,
+    );
+    progress("Loading microphone audio processing…");
+    if (!this.context.audioWorklet)
+      throw new Error(
+        "This browser requires AudioWorklet support; use current Chrome, Firefox, or Safari.",
+      );
+    if (!this.module) {
+      const loading = this.context.audioWorklet.addModule(workletUrl);
+      this.module = loading;
+      void loading.catch(() => {
+        if (this.module === loading) this.module = undefined;
+      });
+    }
+    await withTimeout(
+      this.module,
+      "Microphone audio processing could not load. Reload the page and try again.",
+    );
+    this.node = new AudioWorkletNode(this.context, "pcm-processor");
+    let receivedAudio!: () => void;
+    const firstFrame = new Promise<void>((resolve) => {
+      receivedAudio = resolve;
+    });
+    this.node.port.onmessage = (e) => {
+      this.receivedBytes += e.data.pcm.byteLength;
+      this.receivedChunks++;
+      this.peakLevel = Math.max(this.peakLevel, e.data.level);
+      receivedAudio();
+      send(e.data.pcm, e.data.level);
+    };
+    this.source = this.context.createMediaStreamSource(this.stream);
+    this.source.connect(this.node);
+    const mute = this.context.createGain();
+    this.mute = mute;
+    mute.gain.value = 0;
+    this.node.connect(mute).connect(this.context.destination);
+    this.stream.getAudioTracks().forEach((t) => {
+      t.onended = () => onInterrupt("Microphone ended. Restart capture.");
+      t.onmute = () =>
+        onInterrupt("Microphone interrupted; audio may be lost.");
+    });
+    this.context.onstatechange = () => {
+      if (this.context?.state === "suspended")
+        onInterrupt("Audio capture suspended by browser. Resume capture.");
+    };
+    if (this.context.state !== "running")
+      throw new Error("Audio is suspended. Keep this tab visible and retry.");
+    progress("Waiting for microphone samples…");
+    await withTimeout(
+      firstFrame,
+      "Microphone opened, but Firefox did not deliver audio. Keep this tab visible, stop other audio or calls, then retry. If it persists, fully close and reopen Firefox.",
+    );
   }
   diagnostics() {
     const track = this.stream?.getAudioTracks()[0];
@@ -157,6 +199,7 @@ export class Microphone {
       contextState: this.context?.state ?? "closed",
       contextCount: this.contextCount,
       startCount: this.startCount,
+      activationResets: this.activationResets,
       sampleRate: this.context?.sampleRate,
       trackState: track?.readyState,
       trackMuted: track?.muted,
