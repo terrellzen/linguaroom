@@ -8,7 +8,6 @@ import {
   type RoomEvent,
 } from "../../../packages/shared/protocol";
 import { Microphone } from "./audio/microphone";
-import { RecorderMicrophone } from "./audio/recorder-microphone";
 const viewer = location.pathname === "/viewer";
 const standalone =
   !viewer && new URLSearchParams(location.search).get("mode") !== "server";
@@ -21,10 +20,7 @@ let paused = false;
 let capturing = false;
 let changingCapture = false;
 let authenticated = false;
-const mic =
-  standalone && RecorderMicrophone.supportedMimeType()
-    ? new RecorderMicrophone()
-    : new Microphone();
+const mic = new Microphone();
 const local = new StandaloneSession(
   (snapshot) => {
     room = snapshot;
@@ -33,7 +29,11 @@ const local = new StandaloneSession(
   notice,
   () => {
     capturing = false;
-    void mic.stop();
+    changingCapture = true;
+    void mic.stop().finally(() => {
+      changingCapture = false;
+      render();
+    });
   },
 );
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -93,11 +93,7 @@ async function api(
   method = body === undefined ? "GET" : "POST",
 ) {
   if (standalone) {
-    if (path === "session")
-      return local.start(
-        startSchema.parse(body),
-        mic instanceof RecorderMicrophone ? "auto" : "pcm_s16le",
-      );
+    if (path === "session") return local.start(startSchema.parse(body));
     if (path === "stop") {
       await local.stop();
       return {};
@@ -160,13 +156,19 @@ function options() {
   };
 }
 function render() {
-  el("state").textContent = room?.state ?? "Idle";
+  const waitingForAudio =
+    standalone && room?.state === "connected" && !room.metrics.audioConfirmed;
+  el("state").textContent = waitingForAudio
+    ? "Waiting for audio"
+    : (room?.state ?? "Idle");
   el("meeting-title").textContent = room?.name ?? "Ready when you are";
   if (!viewer) {
     const active = room?.state === "connected" || room?.state === "connecting";
     el<HTMLButtonElement>("start").disabled = capturing || changingCapture;
     el("start").textContent = capturing
-      ? "● Live"
+      ? waitingForAudio
+        ? "● Listening"
+        : "● Live"
       : active
         ? "Reconnect microphone"
         : "Start meeting";
@@ -236,8 +238,13 @@ function render() {
     row.append(meta, text);
   }
   container.scrollTop = container.scrollHeight;
-  if (!standalone)
-    el("diagnostics").textContent = JSON.stringify(room.metrics, null, 2);
+  el("diagnostics").textContent = JSON.stringify(
+    standalone
+      ? { capture: mic.diagnostics(), provider: room.metrics }
+      : room.metrics,
+    null,
+    2,
+  );
 }
 function connect() {
   if (standalone) return;
@@ -364,12 +371,11 @@ action("start", async () => {
       value("device"),
       (pcm, level) => {
         el<HTMLMeterElement>("meter").value = Math.min(1, level * 5);
-        if (!capturing) return;
+        if (!capturing || paused) return;
         if (standalone) {
           local.audio(pcm);
           return;
         }
-        if (paused) return;
         if (
           socket?.readyState === WebSocket.OPEN &&
           socket.bufferedAmount < 32000
@@ -387,7 +393,6 @@ action("start", async () => {
         : await api("session", options());
     room = data.room;
     capturing = true;
-    if (mic instanceof RecorderMicrophone) mic.commit();
     settings.close();
     if (!standalone) el<HTMLInputElement>("key").value = "";
     if (!standalone)
@@ -396,12 +401,17 @@ action("start", async () => {
         location.origin,
       ).href;
     paused = false;
+    el("pause").textContent = "Pause";
     el<HTMLButtonElement>("start").disabled = true;
     el<HTMLButtonElement>("pause").disabled = false;
     el<HTMLButtonElement>("stop").disabled = false;
     connect();
     render();
-    notice("Meeting live. Audio is being processed by Soniox.");
+    notice(
+      standalone && !room?.metrics.audioConfirmed
+        ? "Microphone connected. Waiting for Soniox to process audio…"
+        : "Meeting live. Audio is being processed by Soniox.",
+    );
   } catch (error) {
     capturing = false;
     await mic.stop();
@@ -417,6 +427,7 @@ action("pause", async () => {
   paused = !paused;
   if (paused) await mic.pause();
   else await mic.resume();
+  if (standalone) local.setPaused(paused);
   el("pause").textContent = paused ? "Resume" : "Pause";
   notice(
     paused
@@ -549,14 +560,16 @@ if (viewer) {
     );
   else connect();
 } else if (standalone) {
-  // Native recording does not expose PCM levels; do not show a false zero meter.
-  el("meter").closest("label")!.hidden = mic instanceof RecorderMicrophone;
   authenticated = true;
   el("login").hidden = true;
   el("controls").hidden = false;
   el("exports").hidden = false;
   el("logout").hidden = true;
   el("save").closest("label")!.remove();
+  const audioDiagnostics = document.createElement("details");
+  audioDiagnostics.innerHTML = "<summary>Audio diagnostics</summary>";
+  audioDiagnostics.append(el("diagnostics"));
+  settings.append(audioDiagnostics);
   el("share").closest("details")!.remove();
   el("test").hidden = true;
   el<HTMLInputElement>("key").placeholder = "Your personal Soniox API key";

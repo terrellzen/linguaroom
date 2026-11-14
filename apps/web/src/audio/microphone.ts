@@ -23,6 +23,9 @@ export class Microphone {
   private stream?: MediaStream;
   private node?: AudioWorkletNode;
   private source?: MediaStreamAudioSourceNode;
+  private receivedBytes = 0;
+  private receivedChunks = 0;
+  private peakLevel = 0;
   async start(
     deviceId: string,
     send: (pcm: ArrayBuffer, level: number) => void,
@@ -40,9 +43,15 @@ export class Microphone {
       // Activate audio synchronously during the Start button gesture, before
       // permission prompts or worklet loading can consume user activation.
       this.context = new AudioContext();
-      // Firefox can leave a resume promise pending even after the graph starts.
-      // Observe it, but verify startup using actual worklet frames below.
-      void this.context.resume().catch(() => {});
+      this.receivedBytes = 0;
+      this.receivedChunks = 0;
+      this.peakLevel = 0;
+      const ready = withTimeout(
+        this.context.resume(),
+        "Audio activation timed out. Keep this tab visible and retry.",
+        20000,
+      );
+      void ready.catch(() => {});
       let acceptingStream = true;
       const requestedStream = navigator.mediaDevices
         .getUserMedia({
@@ -66,6 +75,10 @@ export class Microphone {
       } finally {
         acceptingStream = false;
       }
+      // Match the working Termux version: do not load or construct a worklet
+      // until the playback engine has finished starting.
+      progress("Activating microphone audio…");
+      await ready;
       progress("Loading microphone audio processing…");
       if (!this.context.audioWorklet)
         throw new Error(
@@ -81,6 +94,9 @@ export class Microphone {
         receivedAudio = resolve;
       });
       this.node.port.onmessage = (e) => {
+        this.receivedBytes += e.data.pcm.byteLength;
+        this.receivedChunks++;
+        this.peakLevel = Math.max(this.peakLevel, e.data.level);
         receivedAudio();
         send(e.data.pcm, e.data.level);
       };
@@ -98,10 +114,9 @@ export class Microphone {
         if (this.context?.state === "suspended")
           onInterrupt("Audio capture suspended by browser. Resume capture.");
       };
-      progress("Activating microphone audio…");
-      // Opening the Android input device can interrupt an earlier resume.
-      // Resume again after connecting the input; only PCM proves capture works.
-      void this.context.resume().catch(() => {});
+      if (this.context.state !== "running")
+        throw new Error("Audio is suspended. Keep this tab visible and retry.");
+      progress("Waiting for microphone samples…");
       await withTimeout(
         firstFrame,
         "Microphone opened, but Firefox did not deliver audio. Keep this tab visible, stop other audio or calls, then retry. If it persists, fully close and reopen Firefox.",
@@ -111,6 +126,19 @@ export class Microphone {
       throw error;
     }
   }
+  diagnostics() {
+    const track = this.stream?.getAudioTracks()[0];
+    return {
+      contextState: this.context?.state ?? "closed",
+      sampleRate: this.context?.sampleRate,
+      trackState: track?.readyState,
+      trackMuted: track?.muted,
+      receivedBytes: this.receivedBytes,
+      receivedChunks: this.receivedChunks,
+      peakLevel: this.peakLevel,
+    };
+  }
+
   async pause() {
     await this.context?.suspend();
   }

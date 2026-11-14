@@ -12,6 +12,7 @@ function setup(
 ) {
   const events: string[] = [];
   const timers = new Set<() => void>();
+  let activate!: () => void;
   let finishClose!: () => void;
   let grant!: (stream: unknown) => void;
   const track = { stop: () => events.push("stop") };
@@ -19,18 +20,32 @@ function setup(
   let worklet: { port: { onmessage?: (event: unknown) => void } } | undefined;
   const connection = { connect: () => connection, disconnect() {} };
   class Context {
-    state = "running";
-    audioWorklet = { addModule: async () => {} };
+    state = pendingActivation ? "suspended" : "running";
+    audioWorklet = {
+      addModule: async () => {
+        events.push("module");
+      },
+    };
     resume() {
       events.push("resume");
-      if (deliversAudio)
-        worklet?.port.onmessage?.({
-          data: { pcm: new ArrayBuffer(3200), level: 0 },
-        });
-      return pendingActivation ? new Promise(() => {}) : Promise.resolve();
+      if (!pendingActivation) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        activate = () => {
+          this.state = "running";
+          resolve();
+        };
+      });
     }
     createMediaStreamSource() {
-      return connection;
+      return {
+        connect() {
+          if (deliversAudio)
+            worklet?.port.onmessage?.({
+              data: { pcm: new ArrayBuffer(3200), level: 0.5 },
+            });
+        },
+        disconnect() {},
+      };
     }
     createGain() {
       return { ...connection, gain: { value: 1 } };
@@ -65,6 +80,7 @@ function setup(
     AudioWorkletNode: class {
       port = {};
       constructor() {
+        events.push("node");
         worklet = { port: this.port };
       }
       connect = connection.connect;
@@ -88,6 +104,7 @@ function setup(
     timers,
     grant: () => grant(stream),
     finishClose: () => finishClose(),
+    activate: () => activate(),
   };
 }
 
@@ -98,10 +115,10 @@ test("microphone activates audio before awaiting permission and cleans up", asyn
     () => {},
     () => {},
   );
-  assert.deepEqual(events, ["resume", "permission", "resume"]);
+  assert.deepEqual(events, ["resume", "permission", "module", "node"]);
   assert.equal(timers.size, 0);
   await mic.stop();
-  assert.deepEqual(events.slice(3), ["stop", "close"]);
+  assert.deepEqual(events.slice(4), ["stop", "close"]);
 });
 
 test("permission timeout releases a microphone granted after the failed attempt", async () => {
@@ -128,7 +145,7 @@ test("blocked audio activation fails with retry guidance and releases capture", 
     () => {},
     () => {},
   );
-  const rejected = assert.rejects(started, /Firefox did not deliver audio/);
+  const rejected = assert.rejects(started, /Audio activation timed out/);
   for (let i = 0; i < 10; i++) await Promise.resolve();
   [...timers].forEach((callback) => callback());
   await rejected;
@@ -178,16 +195,19 @@ test("cleanup completes even when the browser never resolves close", async () =>
   assert.equal(timers.size, 0);
 });
 
-test("capture succeeds when Firefox delivers PCM but never resolves resume", async () => {
-  const { mic, timers } = setup(false, true, false, true);
-  const frames: ArrayBuffer[] = [];
-  await mic.start(
+test("working Termux sequence waits for activation before loading the worklet", async () => {
+  const { mic, events, activate } = setup(false, true, false, true);
+  const started = mic.start(
     "",
-    (pcm: ArrayBuffer) => frames.push(pcm),
+    () => {},
     () => {},
   );
-  assert.equal(frames.length, 1);
-  assert.equal(frames[0].byteLength, 3200);
-  assert.equal(timers.size, 0);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.deepEqual(events, ["resume", "permission"]);
+  activate();
+  await started;
+  assert.deepEqual(events, ["resume", "permission", "module", "node"]);
+  assert.equal(mic.diagnostics().receivedBytes, 3200);
+  assert.equal(mic.diagnostics().peakLevel, 0.5);
   await mic.stop();
 });

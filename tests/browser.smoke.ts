@@ -152,13 +152,20 @@ try {
     permissions: firefoxTest ? [] : ["microphone"],
     viewport: { width: 390, height: 844 },
   });
-  // Direct capture must work with Web Audio completely unavailable.
+  // The working Termux sequence must also hold in the direct Pages path.
   await standaloneContext.addInitScript(() => {
-    window.AudioContext = class {
-      constructor() {
-        throw new Error("Standalone capture must not open playback audio");
+    const NativeContext = window.AudioContext;
+    window.AudioContext = class extends NativeContext {
+      constructor(...options: ConstructorParameters<typeof AudioContext>) {
+        super(...options);
+        const addModule = this.audioWorklet.addModule.bind(this.audioWorklet);
+        this.audioWorklet.addModule = (...args) => {
+          if (this.state !== "running")
+            throw new Error("Worklet loaded before audio activation finished");
+          return addModule(...args);
+        };
       }
-    } as unknown as typeof AudioContext;
+    };
   });
   let standaloneConnections = 0;
   await standaloneContext.routeWebSocket(
@@ -174,43 +181,48 @@ try {
         } else if (typeof message === "string") {
           const config = JSON.parse(message);
           if (config.type === "keepalive") return;
-          assert.equal(config.audio_format, "auto");
-          assert.equal(config.sample_rate, undefined);
-          assert.equal(config.num_channels, undefined);
+          assert.equal(config.audio_format, "pcm_s16le");
+          assert.equal(config.sample_rate, 16000);
+          assert.equal(config.num_channels, 1);
           configured = true;
         } else if (!replied) {
           assert.ok(
             configured,
-            "Provider must receive configuration before encoded audio",
+            "Provider must receive configuration before PCM audio",
           );
-          const header = Buffer.from(message).subarray(0, 4).toString("hex");
-          assert.ok(
-            ["1a45dfa3", "4f676753"].includes(header),
-            "First chunk must contain a WebM or Ogg header",
+          assert.equal(
+            Buffer.from(message).byteLength,
+            3200,
+            "Each frame must be 100 ms of 16 kHz mono PCM",
           );
           replied = true;
-          ws.send(
-            JSON.stringify({
-              tokens: [
-                {
-                  text: "Hello locally.",
-                  is_final: true,
-                  speaker: "1",
-                  language: "en",
-                  start_ms: 0,
-                  end_ms: 1000,
-                },
-                { text: "<end>", is_final: true },
-                {
-                  text: "Hola localmente.",
-                  is_final: true,
-                  speaker: "1",
-                  language: "es",
-                  translation_status: "translation",
-                },
-                { text: "<end>", is_final: true },
-              ],
-            }),
+          setTimeout(
+            () =>
+              ws.send(
+                JSON.stringify({
+                  total_audio_proc_ms: 1000,
+                  tokens: [
+                    {
+                      text: "Hello locally.",
+                      is_final: true,
+                      speaker: "1",
+                      language: "en",
+                      start_ms: 0,
+                      end_ms: 1000,
+                    },
+                    { text: "<end>", is_final: true },
+                    {
+                      text: "Hola localmente.",
+                      is_final: true,
+                      speaker: "1",
+                      language: "es",
+                      translation_status: "translation",
+                    },
+                    { text: "<end>", is_final: true },
+                  ],
+                }),
+              ),
+            1500,
           );
         }
       });
@@ -260,7 +272,29 @@ try {
   );
   await device.locator(".close-settings").click();
   await device.locator("#start").click();
+  await device
+    .getByText("Microphone connected. Waiting for Soniox to process audio…", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(
+    await device.locator("#state").textContent(),
+    "Waiting for audio",
+  );
   await device.getByText("Hola localmente.", { exact: true }).waitFor();
+  await device
+    .getByText("Meeting live. Audio is being processed by Soniox.", {
+      exact: true,
+    })
+    .waitFor();
+  await device.locator("#setup-toggle").click();
+  const diagnostics = JSON.parse(
+    (await device.locator("#diagnostics").textContent()) ?? "{}",
+  );
+  assert.ok(diagnostics.capture.receivedChunks > 0);
+  assert.ok(diagnostics.provider.audioBytesSent > 0);
+  assert.equal(diagnostics.provider.processedAudioMs, 1000);
+  await device.locator(".close-settings").click();
   assert.equal(await device.locator("#controls").isVisible(), false);
   for (const viewport of [
     { width: 390, height: 844 },
@@ -407,7 +441,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: native encoded audio with Web Audio disabled, container headers, pause/resume, repeated start/stop and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: Termux PCM startup order, processing confirmation, pause/resume, repeated start/stop and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();
