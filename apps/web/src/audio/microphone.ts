@@ -3,13 +3,14 @@ import workletUrl from "./pcm-worklet.js?url";
 async function withTimeout<T>(
   promise: Promise<T>,
   message: string,
+  timeoutMs = 30000,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), 30000);
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
       }),
     ]);
   } finally {
@@ -26,12 +27,16 @@ export class Microphone {
     deviceId: string,
     send: (pcm: ArrayBuffer, level: number) => void,
     onInterrupt: (message: string) => void,
+    progress: (message: string) => void = () => {},
   ) {
     if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext)
       throw new Error(
         "Microphone needs localhost or trusted HTTPS. Check certificate trust and browser permissions.",
       );
+    if (this.context)
+      throw new Error("Microphone is already starting or active.");
     try {
+      progress("Waiting for microphone permission…");
       // Activate audio synchronously during the Start button gesture, before
       // permission prompts or worklet loading can consume user activation.
       this.context = new AudioContext();
@@ -64,6 +69,7 @@ export class Microphone {
       } finally {
         acceptingStream = false;
       }
+      progress("Loading microphone audio processing…");
       if (!this.context.audioWorklet)
         throw new Error(
           "This browser requires AudioWorklet support; use current Chrome, Firefox, or Safari.",
@@ -88,6 +94,7 @@ export class Microphone {
         if (this.context?.state === "suspended")
           onInterrupt("Audio capture suspended by browser. Resume capture.");
       };
+      progress("Activating microphone audio…");
       await activated;
     } catch (error) {
       await this.stop();
@@ -101,15 +108,30 @@ export class Microphone {
     await this.context?.resume();
   }
   async stop() {
-    if (this.context) this.context.onstatechange = null;
-    this.node?.disconnect();
-    this.source?.disconnect();
-    this.stream?.getTracks().forEach((t) => t.stop());
-    if (this.context && this.context.state !== "closed")
-      await this.context.close();
+    // Detach ownership before awaiting close: a delayed close from an old
+    // session must never clear the resources belonging to a newer session.
+    const { context, node, source, stream } = this;
     this.context = undefined;
     this.stream = undefined;
     this.node = undefined;
     this.source = undefined;
+    if (context) context.onstatechange = null;
+    if (node) node.port.onmessage = null;
+    stream?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.onmute = null;
+      track.stop();
+    });
+    node?.disconnect();
+    source?.disconnect();
+    if (context && context.state !== "closed") {
+      // Some mobile audio backends never settle close(). Capture has already
+      // been released, so cleanup must not hide startup errors or block retry.
+      await withTimeout(
+        context.close(),
+        "Audio cleanup timed out.",
+        2000,
+      ).catch(() => {});
+    }
   }
 }

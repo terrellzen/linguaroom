@@ -18,6 +18,7 @@ let socket: WebSocket | undefined;
 let intentional = false;
 let paused = false;
 let capturing = false;
+let changingCapture = false;
 let authenticated = false;
 const mic = new Microphone();
 const local = new StandaloneSession(
@@ -122,9 +123,14 @@ async function api(
 }
 function action(id: string, fn: () => Promise<unknown> | void) {
   el(id).onclick = () => {
-    Promise.resolve()
-      .then(fn)
-      .catch((e) => notice(e instanceof Error ? e.message : "Action failed"));
+    const report = (error: unknown) =>
+      notice(error instanceof Error ? error.message : "Action failed");
+    try {
+      // Keep audio activation inside the browser's original click handler.
+      void Promise.resolve(fn()).catch(report);
+    } catch (error) {
+      report(error);
+    }
   };
 }
 const names = new Intl.DisplayNames(["en"], { type: "language" });
@@ -150,14 +156,14 @@ function render() {
   el("meeting-title").textContent = room?.name ?? "Ready when you are";
   if (!viewer) {
     const active = room?.state === "connected" || room?.state === "connecting";
-    el<HTMLButtonElement>("start").disabled = capturing;
+    el<HTMLButtonElement>("start").disabled = capturing || changingCapture;
     el("start").textContent = capturing
       ? "● Live"
       : active
         ? "Reconnect microphone"
         : "Start meeting";
     el<HTMLButtonElement>("stop").disabled =
-      !active && room?.state !== "disconnected";
+      changingCapture || (!active && room?.state !== "disconnected");
     el<HTMLButtonElement>("pause").disabled = !capturing;
   }
   if (!room) return;
@@ -335,14 +341,15 @@ action("sign-in", async () => {
   notice("Host authenticated.");
 });
 action("start", async () => {
-  if (!authenticated || el<HTMLButtonElement>("start").disabled) return;
+  if (!authenticated || changingCapture || capturing) return;
   if (standalone && !value("key")) {
     settings.showModal();
     notice("Add your Soniox API key in Settings to begin.");
     el<HTMLInputElement>("key").focus();
     return;
   }
-  el<HTMLButtonElement>("start").disabled = true;
+  changingCapture = true;
+  render();
   notice("Connecting microphone…");
   try {
     await mic.start(
@@ -362,7 +369,9 @@ action("start", async () => {
         else notice("Audio transport unavailable or behind; audio dropped.");
       },
       notice,
+      notice,
     );
+    notice("Connecting to Soniox…");
     const data =
       room?.state === "connected"
         ? await api("status")
@@ -389,6 +398,9 @@ action("start", async () => {
     if (standalone) await local.stop();
     render();
     throw error;
+  } finally {
+    changingCapture = false;
+    render();
   }
 });
 action("pause", async () => {
@@ -403,18 +415,26 @@ action("pause", async () => {
   );
 });
 action("stop", async () => {
-  capturing = false;
-  await mic.stop();
-  await api("stop", {});
-  el<HTMLButtonElement>("start").disabled = false;
-  el<HTMLButtonElement>("pause").disabled = true;
-  el<HTMLButtonElement>("stop").disabled = true;
-  await status();
-  notice(
-    standalone
-      ? "Meeting ended. Export your transcript before closing."
-      : "Meeting ended. API key reference discarded.",
-  );
+  if (changingCapture) return;
+  changingCapture = true;
+  render();
+  try {
+    capturing = false;
+    await mic.stop();
+    await api("stop", {});
+    el<HTMLButtonElement>("start").disabled = false;
+    el<HTMLButtonElement>("pause").disabled = true;
+    el<HTMLButtonElement>("stop").disabled = true;
+    await status();
+    notice(
+      standalone
+        ? "Meeting ended. Export your transcript before closing."
+        : "Meeting ended. API key reference discarded.",
+    );
+  } finally {
+    changingCapture = false;
+    render();
+  }
 });
 action("clear-key", () => {
   el<HTMLInputElement>("key").value = "";

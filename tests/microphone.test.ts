@@ -4,9 +4,14 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 
-function setup(pendingPermission = false, pendingActivation = false) {
+function setup(
+  pendingPermission = false,
+  pendingActivation = false,
+  pendingClose = false,
+) {
   const events: string[] = [];
   const timers = new Set<() => void>();
+  let finishClose!: () => void;
   let grant!: (stream: unknown) => void;
   const track = { stop: () => events.push("stop") };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
@@ -26,6 +31,10 @@ function setup(pendingPermission = false, pendingActivation = false) {
     }
     async close() {
       events.push("close");
+      if (pendingClose)
+        await new Promise<void>((resolve) => {
+          finishClose = resolve;
+        });
       this.state = "closed";
     }
   }
@@ -64,7 +73,13 @@ function setup(pendingPermission = false, pendingActivation = false) {
     }),
     scope,
   );
-  return { mic: scope.mic, events, timers, grant: () => grant(stream) };
+  return {
+    mic: scope.mic,
+    events,
+    timers,
+    grant: () => grant(stream),
+    finishClose: () => finishClose(),
+  };
 }
 
 test("microphone activates audio before awaiting permission and cleans up", async () => {
@@ -110,4 +125,46 @@ test("blocked audio activation fails with retry guidance and releases capture", 
   await rejected;
   assert.ok(events.includes("stop"));
   assert.ok(events.includes("close"));
+});
+
+test("a delayed old close cannot erase a restarted microphone", async () => {
+  const { mic, events, finishClose } = setup(false, false, true);
+  await mic.start(
+    "",
+    () => {},
+    () => {},
+  );
+  const closing = mic.stop();
+  await mic.start(
+    "",
+    () => {},
+    () => {},
+  );
+  finishClose();
+  await closing;
+  const closingAgain = mic.stop();
+  assert.equal(events.filter((event) => event === "stop").length, 2);
+  finishClose();
+  await closingAgain;
+});
+
+test("cleanup completes even when the browser never resolves close", async () => {
+  const { mic, timers } = setup(false, false, true);
+  await mic.start(
+    "",
+    () => {},
+    () => {},
+  );
+  const closing = mic.stop();
+  [...timers].forEach((callback) => callback());
+  await closing;
+  await mic.start(
+    "",
+    () => {},
+    () => {},
+  );
+  const closingAgain = mic.stop();
+  [...timers].forEach((callback) => callback());
+  await closingAgain;
+  assert.equal(timers.size, 0);
 });
