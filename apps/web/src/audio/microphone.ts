@@ -33,6 +33,7 @@ export class Microphone {
   private contextCount = 0;
   private startCount = 0;
   private activationResets = 0;
+  private activationTaps = 0;
   private stream?: MediaStream;
   private node?: AudioWorkletNode;
   private source?: MediaStreamAudioSourceNode;
@@ -44,6 +45,7 @@ export class Microphone {
     send: (pcm: ArrayBuffer, level: number) => void,
     onInterrupt: (message: string) => void,
     progress: (message: string) => void = () => {},
+    requestActivation?: (resume: () => Promise<void>) => Promise<void>,
   ) {
     if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext)
       throw new Error(
@@ -62,6 +64,7 @@ export class Microphone {
             onInterrupt,
             progress,
             attempt === 0 ? 3000 : 20000,
+            requestActivation,
           );
           return;
         } catch (error) {
@@ -92,6 +95,7 @@ export class Microphone {
     onInterrupt: (message: string) => void,
     progress: (message: string) => void,
     activationTimeoutMs: number,
+    requestActivation?: (resume: () => Promise<void>) => Promise<void>,
   ) {
     // Activate audio synchronously during the Start button gesture, before
     // permission prompts or worklet loading can consume user activation.
@@ -135,13 +139,30 @@ export class Microphone {
     progress("Activating microphone audio…");
     // getUserMedia changes audio permission/routing on Android. Resume again
     // now that capture is granted, before awaiting activation or loading nodes.
-    await withTimeout(
-      this.context.resume(),
-      new AudioActivationTimeout(
-        "Audio activation timed out. Keep this tab visible and retry.",
-      ),
-      activationTimeoutMs,
-    );
+    try {
+      await withTimeout(
+        this.context.resume(),
+        new AudioActivationTimeout(
+          "Audio activation timed out. Keep this tab visible and retry.",
+        ),
+        activationTimeoutMs,
+      );
+    } catch (error) {
+      if (!(error instanceof AudioActivationTimeout) || !requestActivation)
+        throw error;
+      // Keep the granted input open so a new, explicit user gesture can unlock
+      // playback. An automatic retry cannot supply browser user activation.
+      progress("Tap Activate audio to finish connecting your microphone.");
+      const context = this.context;
+      await withTimeout(
+        requestActivation(() => {
+          this.activationTaps++;
+          return context.resume();
+        }),
+        "Audio activation did not complete. Tap Start meeting to try again.",
+        60000,
+      );
+    }
     progress("Loading microphone audio processing…");
     if (!this.context.audioWorklet)
       throw new Error(
@@ -200,6 +221,7 @@ export class Microphone {
       contextCount: this.contextCount,
       startCount: this.startCount,
       activationResets: this.activationResets,
+      activationTaps: this.activationTaps,
       sampleRate: this.context?.sampleRate,
       trackState: track?.readyState,
       trackMuted: track?.muted,

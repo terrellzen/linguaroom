@@ -68,6 +68,11 @@ settings.addEventListener("click", (event) => {
 const transport = document.createElement("div");
 transport.className = "transport";
 transport.append(document.querySelector("#start")!.parentElement!);
+const activateAudio = document.createElement("button");
+activateAudio.textContent = "Activate audio";
+activateAudio.className = "primary";
+activateAudio.hidden = true;
+transport.append(activateAudio);
 const liveHint = document.createElement("span");
 liveHint.className = "transport-hint";
 liveHint.textContent = "Your voice. A world of understanding.";
@@ -395,6 +400,22 @@ action("start", async () => {
       },
       notice,
       notice,
+      (resume) => {
+        // The resume call must happen directly in this click handler, without
+        // awaiting permission, cleanup, or any other asynchronous work first.
+        settings.close();
+        activateAudio.hidden = false;
+        activateAudio.disabled = false;
+        activateAudio.focus();
+        return new Promise<void>((resolve, reject) => {
+          activateAudio.onclick = () => {
+            activateAudio.disabled = true;
+            const activating = resume();
+            notice("Activating microphone from your tap…");
+            activating.then(resolve, reject);
+          };
+        });
+      },
     );
     notice("Connecting to Soniox…");
     const data =
@@ -429,6 +450,8 @@ action("start", async () => {
     render();
     throw error;
   } finally {
+    activateAudio.hidden = true;
+    activateAudio.onclick = null;
     changingCapture = false;
     render();
   }

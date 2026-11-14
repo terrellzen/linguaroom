@@ -156,11 +156,21 @@ try {
   await standaloneContext.addInitScript(() => {
     const stats = window as typeof window & { audioContextCount: number };
     stats.audioContextCount = 0;
-    // Model the phone report: every meeting needs a full input reset before
-    // activation can succeed, not just another resume after permission.
+    // Simulate activation requiring a fresh trusted tap after permission.
+    // This checks the recovery flow, not the actual Android audio backend.
     let captureGranted = false;
     let needsReset = true;
-    let stalledActivation = false;
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (
+          event.isTrusted &&
+          (event.target as HTMLElement)?.textContent === "Activate audio"
+        )
+          needsReset = false;
+      },
+      true,
+    );
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
       navigator.mediaDevices,
     );
@@ -180,16 +190,8 @@ try {
     const NativeContext = window.AudioContext;
     window.AudioContext = class extends NativeContext {
       resume() {
-        if (needsReset) stalledActivation = true;
         if (!captureGranted || needsReset) return new Promise<void>(() => {});
         return super.resume();
-      }
-      suspend() {
-        if (stalledActivation) {
-          needsReset = false;
-          stalledActivation = false;
-        }
-        return super.suspend();
       }
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
@@ -315,6 +317,9 @@ try {
   await device.locator(".close-settings").click();
   await device.locator("#start").click();
   await device
+    .getByRole("button", { name: "Activate audio", exact: true })
+    .click();
+  await device
     .getByText("Microphone connected. Waiting for Soniox to process audio…", {
       exact: true,
     })
@@ -334,7 +339,7 @@ try {
     (await device.locator("#diagnostics").textContent()) ?? "{}",
   );
   assert.ok(diagnostics.capture.receivedChunks > 0);
-  assert.equal(diagnostics.capture.activationResets, 1);
+  assert.equal(diagnostics.capture.activationResets, 0);
   assert.equal(diagnostics.capture.startCount, 1);
   assert.ok(diagnostics.provider.audioBytesSent > 0);
   assert.equal(diagnostics.provider.processedAudioMs, 1000);
@@ -462,6 +467,9 @@ try {
     if (reload) await device.reload();
     await device.locator("#start").click();
     await device
+      .getByRole("button", { name: "Activate audio", exact: true })
+      .click();
+    await device
       .getByText("Meeting live. Audio is being processed by Soniox.", {
         exact: true,
       })
@@ -472,8 +480,8 @@ try {
     );
     assert.equal(
       recovered.capture.activationResets,
-      recovered.capture.startCount,
-      "Each user Start must recover internally without a second click",
+      0,
+      "The activation tap must preserve the granted input without a reset",
     );
     assert.equal(
       await device.evaluate(
@@ -502,7 +510,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: activation deliberately stalled until input reset, bounded recovery on the same Start, PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: activation deliberately stalled until a trusted activation tap, recovery without reacquiring input, PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();

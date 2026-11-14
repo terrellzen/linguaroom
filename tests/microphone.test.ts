@@ -293,3 +293,34 @@ test("permission denial does not trigger another capture request", async () => {
   assert.equal(mic.diagnostics().activationResets, 0);
   assert.equal(timers.size, 0);
 });
+
+test("a fresh activation gesture unlocks the granted input without reset", async () => {
+  const { mic, events, timers, activate } = setup({ pendingActivation: true });
+  let resumeFromTap: (() => Promise<void>) | undefined;
+  const started = mic.start(
+    "",
+    ignore,
+    ignore,
+    ignore,
+    (resume: () => Promise<void>) => {
+      resumeFromTap = resume;
+      return new Promise<void>((resolve, reject) => {
+        // The test controls the tap separately from the initial timeout.
+        tap = () => resume().then(resolve, reject);
+      });
+    },
+  );
+  let tap!: () => void;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  [...timers].forEach((callback) => callback());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(resumeFromTap);
+  assert.equal(events.includes("track stopped"), false);
+  tap();
+  activate();
+  await started;
+  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(timers.size, 0);
+  await mic.stop();
+});
