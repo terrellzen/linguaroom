@@ -154,10 +154,13 @@ try {
   });
   // The working Termux sequence must also hold in the direct Pages path.
   await standaloneContext.addInitScript(() => {
+    const stats = window as typeof window & { audioContextCount: number };
+    stats.audioContextCount = 0;
     const NativeContext = window.AudioContext;
     window.AudioContext = class extends NativeContext {
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
+        stats.audioContextCount++;
         const addModule = this.audioWorklet.addModule.bind(this.audioWorklet);
         this.audioWorklet.addModule = (...args) => {
           if (this.state !== "running")
@@ -261,6 +264,12 @@ try {
   await device.setViewportSize({ width: 390, height: 844 });
 
   assert.equal(await device.locator("#login").isVisible(), false);
+  const initialDiagnostics = JSON.parse(
+    (await device.locator("#diagnostics").textContent()) ?? "{}",
+  );
+  assert.ok(initialDiagnostics.build);
+  assert.equal(initialDiagnostics.capture.contextState, "closed");
+  assert.equal(initialDiagnostics.capture.startCount, 0);
   await device.locator("#setup-toggle").click();
   await device.locator("#key").fill("synthetic-personal-key");
   await device.locator("#remember-key").check();
@@ -414,7 +423,7 @@ try {
       exact: true,
     })
     .waitFor();
-  for (const reload of [false, true]) {
+  for (const reload of [...Array<boolean>(10).fill(false), true]) {
     if (reload) await device.reload();
     await device.locator("#start").click();
     await device
@@ -423,6 +432,15 @@ try {
       })
       .waitFor();
     await device.getByText("Hola localmente.", { exact: true }).waitFor();
+    assert.equal(
+      await device.evaluate(
+        () =>
+          (window as typeof window & { audioContextCount: number })
+            .audioContextCount,
+      ),
+      1,
+      "All meetings in a page must share one audio engine",
+    );
     await device.locator("#stop").click();
     await device
       .getByText("Meeting ended. Export your transcript before closing.", {
@@ -430,7 +448,7 @@ try {
       })
       .waitFor();
   }
-  assert.equal(standaloneConnections, 3);
+  assert.equal(standaloneConnections, 12);
   await device.locator("#setup-toggle").click();
   await device.locator("#clear-key").click();
   assert.equal(
@@ -441,7 +459,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: Termux PCM startup order, processing confirmation, pause/resume, repeated start/stop and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: Termux PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();

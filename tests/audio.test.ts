@@ -51,3 +51,27 @@ test("worklet carries fractional resampling phase at 44.1k", () => {
   assert.equal(messages.length, 10);
   assert.equal(new DataView(messages[0].pcm).getInt16(0, true), -32768);
 });
+
+test("stopped worklet relinquishes processing instead of staying active", () => {
+  let Processor!: new () => {
+    port: { onmessage: (event: { data: { type: string } }) => void };
+    process(inputs: Float32Array[][]): boolean;
+  };
+  class Base {
+    port = { postMessage() {} };
+  }
+  vm.runInNewContext(
+    readFileSync("apps/web/src/audio/pcm-worklet.js", "utf8"),
+    {
+      AudioWorkletProcessor: Base,
+      sampleRate: 48000,
+      registerProcessor: (_name: string, constructor: typeof Processor) => {
+        Processor = constructor;
+      },
+    },
+  );
+  const processor = new Processor();
+  assert.equal(processor.process([]), true);
+  processor.port.onmessage({ data: { type: "stop" } });
+  assert.equal(processor.process([[new Float32Array(128)]]), false);
+});

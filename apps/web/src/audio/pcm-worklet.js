@@ -2,12 +2,17 @@
 class PCMProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
+    this.stopped = false;
+    this.port.onmessage = ({ data }) => {
+      if (data.type === "stop") this.stopped = true;
+    };
     this.sum = 0;
     this.weight = 0;
     this.samples = [];
     this.ratio = sampleRate / 16000;
   }
   process(inputs) {
+    if (this.stopped) return false;
     const input = inputs[0]?.[0];
     if (!input) return true;
     const energy = input.reduce((sum, value) => sum + value * value, 0);

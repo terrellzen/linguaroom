@@ -84,8 +84,24 @@ function value(id: string) {
 function checked(id: string) {
   return el<HTMLInputElement>(id).checked;
 }
+function renderDiagnostics() {
+  const target = document.getElementById("diagnostics");
+  if (!target) return;
+  target.textContent = JSON.stringify(
+    {
+      build: __APP_BUILD__,
+      mode: standalone ? "standalone" : viewer ? "viewer" : "server",
+      stage: document.getElementById("notice")?.textContent ?? "Idle",
+      capture: mic.diagnostics(),
+      provider: room?.metrics ?? {},
+    },
+    null,
+    2,
+  );
+}
 function notice(message: string) {
   el("notice").textContent = message;
+  renderDiagnostics();
 }
 async function api(
   path: string,
@@ -176,6 +192,7 @@ function render() {
       changingCapture || (!active && room?.state !== "disconnected");
     el<HTMLButtonElement>("pause").disabled = !capturing;
   }
+  renderDiagnostics();
   if (!room) return;
   const container = el("captions");
   if (room.segments.length) container.querySelector(".empty")?.remove();
@@ -238,13 +255,6 @@ function render() {
     row.append(meta, text);
   }
   container.scrollTop = container.scrollHeight;
-  el("diagnostics").textContent = JSON.stringify(
-    standalone
-      ? { capture: mic.diagnostics(), provider: room.metrics }
-      : room.metrics,
-    null,
-    2,
-  );
 }
 function connect() {
   if (standalone) return;
@@ -539,7 +549,7 @@ el("original").onchange = render;
 el("labels").onchange = render;
 window.addEventListener("pagehide", () => {
   intentional = true;
-  void mic.stop();
+  void mic.dispose();
   socket?.close();
   local.socket?.close();
 });
@@ -567,7 +577,7 @@ if (viewer) {
   el("logout").hidden = true;
   el("save").closest("label")!.remove();
   const audioDiagnostics = document.createElement("details");
-  audioDiagnostics.innerHTML = "<summary>Audio diagnostics</summary>";
+  audioDiagnostics.innerHTML = `<summary>Audio diagnostics · build ${__APP_BUILD__}</summary>`;
   audioDiagnostics.append(el("diagnostics"));
   settings.append(audioDiagnostics);
   el("share").closest("details")!.remove();
@@ -660,3 +670,5 @@ if (!viewer && !standalone)
   setInterval(() => {
     if (authenticated) void status().catch(() => {});
   }, 5000);
+
+renderDiagnostics();
