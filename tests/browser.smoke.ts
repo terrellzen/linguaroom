@@ -198,12 +198,6 @@ try {
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
         stats.audioContextCount++;
-        const addModule = this.audioWorklet.addModule.bind(this.audioWorklet);
-        this.audioWorklet.addModule = (...args) => {
-          if (this.state !== "running")
-            throw new Error("Worklet loaded before audio activation finished");
-          return addModule(...args);
-        };
       }
     };
   });

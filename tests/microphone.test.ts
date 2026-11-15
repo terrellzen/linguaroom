@@ -12,6 +12,7 @@ function setup({
   pendingClose = false,
   activationNeedsPermission = false,
   activationNeedsReset = false,
+  activationNeedsGraph = false,
 } = {}) {
   const events: string[] = [];
   const timers = new Set<() => void>();
@@ -21,6 +22,7 @@ function setup({
   let contexts = 0;
   let permissionGranted = false;
   let inputReset = false;
+  let graphConnected = false;
   const track = {
     stop: () => {
       events.push("track stopped");
@@ -29,7 +31,13 @@ function setup({
   };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
   let worklet: { port: { onmessage?: (event: unknown) => void } } | undefined;
-  const connection = { connect: () => connection, disconnect() {} };
+  const connection = {
+    connect: () => {
+      graphConnected = true;
+      return connection;
+    },
+    disconnect() {},
+  };
   class Context {
     state = "suspended";
     constructor() {
@@ -42,6 +50,8 @@ function setup({
     };
     resume() {
       events.push("resume");
+      if (activationNeedsGraph && !graphConnected)
+        return new Promise<void>(() => {});
       if (activationNeedsReset && !inputReset)
         return new Promise<void>(() => {});
       if (activationNeedsPermission && !permissionGranted)
@@ -168,19 +178,25 @@ test("twenty meetings reuse one audio context and module, with fresh input proce
   assert.equal(events.filter((event) => event === "close").length, 1);
 });
 
-test("activation still completes before loading the processor", async () => {
+test("processor graph is connected before waiting for engine activation", async () => {
   const { mic, events, activate } = setup({ pendingActivation: true });
   const starting = mic.start("", ignore, ignore);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  assert.deepEqual(events, ["resume", "permission", "resume"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    "resume",
+    "permission",
+    "module",
+    "node",
+    "resume",
+  ]);
   activate();
   await starting;
   assert.deepEqual(events, [
     "resume",
     "permission",
-    "resume",
     "module",
     "node",
+    "resume",
   ]);
   assert.equal(mic.diagnostics().peakLevel, 0.5);
   await mic.stop();
@@ -228,7 +244,7 @@ test("blocked activation releases capture and reports the timeout", async () => 
   await rejected;
   assert.ok(events.includes("track stopped"));
   assert.equal(events.filter((event) => event === "permission").length, 2);
-  assert.equal(events.includes("module"), false);
+  assert.equal(events.includes("module"), true);
 });
 
 test("disposal bounds a stalled browser close and clears page ownership", async () => {
@@ -255,9 +271,9 @@ test("first resume may stay pending until permission; the same Start succeeds", 
   assert.deepEqual(events, [
     "resume",
     "permission",
-    "resume",
     "module",
     "node",
+    "resume",
   ]);
   assert.equal(contexts(), 1);
   assert.equal(mic.diagnostics().startCount, 1);
@@ -273,11 +289,11 @@ test("a device needing failed-start cleanup recovers inside a single Start", asy
   const started = mic.start("", ignore, ignore);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(events.filter((event) => event === "permission").length, 1);
-  assert.equal(events.includes("node"), false);
+  assert.equal(events.includes("node"), true);
   [...timers].forEach((callback) => callback());
   await started;
   assert.equal(events.filter((event) => event === "permission").length, 2);
-  assert.equal(events.filter((event) => event === "node").length, 1);
+  assert.equal(events.filter((event) => event === "node").length, 2);
   assert.equal(mic.diagnostics().activationResets, 1);
   assert.equal(mic.diagnostics().startCount, 1);
   assert.equal(mic.diagnostics().receivedChunks, 1);
@@ -319,6 +335,17 @@ test("a fresh activation gesture unlocks the granted input without reset", async
   tap();
   activate();
   await started;
+  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(timers.size, 0);
+  await mic.stop();
+});
+
+test("activation requiring a connected graph succeeds on the first Start", async () => {
+  const { mic, events, timers } = setup({ activationNeedsGraph: true });
+  await mic.start("", ignore, ignore);
+  assert.equal(mic.diagnostics().startCount, 1);
+  assert.equal(mic.diagnostics().activationResets, 0);
   assert.equal(events.filter((event) => event === "permission").length, 1);
   assert.equal(mic.diagnostics().receivedChunks, 1);
   assert.equal(timers.size, 0);

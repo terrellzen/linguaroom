@@ -134,35 +134,6 @@ export class Microphone {
     } finally {
       acceptingStream = false;
     }
-    // Match the working Termux version: do not load or construct a worklet
-    // until the playback engine has finished starting.
-    progress("Activating microphone audio…");
-    // getUserMedia changes audio permission/routing on Android. Resume again
-    // now that capture is granted, before awaiting activation or loading nodes.
-    try {
-      await withTimeout(
-        this.context.resume(),
-        new AudioActivationTimeout(
-          "Audio activation timed out. Keep this tab visible and retry.",
-        ),
-        activationTimeoutMs,
-      );
-    } catch (error) {
-      if (!(error instanceof AudioActivationTimeout) || !requestActivation)
-        throw error;
-      // Keep the granted input open so a new, explicit user gesture can unlock
-      // playback. An automatic retry cannot supply browser user activation.
-      progress("Tap Activate audio to finish connecting your microphone.");
-      const context = this.context;
-      await withTimeout(
-        requestActivation(() => {
-          this.activationTaps++;
-          return context.resume();
-        }),
-        "Audio activation did not complete. Tap Start meeting to try again.",
-        60000,
-      );
-    }
     progress("Loading microphone audio processing…");
     if (!this.context.audioWorklet)
       throw new Error(
@@ -206,6 +177,33 @@ export class Microphone {
       if (this.context?.state === "suspended")
         onInterrupt("Audio capture suspended by browser. Resume capture.");
     };
+    // Connect the complete input-to-destination graph before waiting for the
+    // engine. Waiting on resume first leaves startup with no capture graph.
+    progress("Activating microphone audio…");
+    try {
+      await withTimeout(
+        this.context.resume(),
+        new AudioActivationTimeout(
+          "Audio activation timed out. Keep this tab visible and retry.",
+        ),
+        activationTimeoutMs,
+      );
+    } catch (error) {
+      if (!(error instanceof AudioActivationTimeout) || !requestActivation)
+        throw error;
+      // Keep the granted input open so a new, explicit user gesture can unlock
+      // playback. An automatic retry cannot supply browser user activation.
+      progress("Tap Activate audio to finish connecting your microphone.");
+      const context = this.context;
+      await withTimeout(
+        requestActivation(() => {
+          this.activationTaps++;
+          return context.resume();
+        }),
+        "Audio activation did not complete. Tap Start meeting to try again.",
+        60000,
+      );
+    }
     if (this.context.state !== "running")
       throw new Error("Audio is suspended. Keep this tab visible and retry.");
     progress("Waiting for microphone samples…");
