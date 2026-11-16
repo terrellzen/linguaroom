@@ -7,7 +7,7 @@ import {
   type Snapshot,
   type RoomEvent,
 } from "../../../packages/shared/protocol";
-import { Microphone } from "./audio/microphone";
+import { Microphone, abortable } from "./audio/microphone";
 import { microphoneTest } from "./audio/microphone-test";
 const viewer = location.pathname === "/viewer";
 const standalone =
@@ -21,6 +21,10 @@ let paused = false;
 let capturing = false;
 let changingCapture = false;
 let testingMicrophone = false;
+let startupController: AbortController | undefined;
+let startupTask: Promise<void> | undefined;
+let resettingMicrophone = false;
+let captureCommand = 0;
 let authenticated = false;
 const mic = new Microphone();
 const local = new StandaloneSession(
@@ -70,11 +74,11 @@ settings.addEventListener("click", (event) => {
 const transport = document.createElement("div");
 transport.className = "transport";
 transport.append(document.querySelector("#start")!.parentElement!);
-const activateAudio = document.createElement("button");
-activateAudio.textContent = "Activate audio";
-activateAudio.className = "primary";
-activateAudio.hidden = true;
-transport.append(activateAudio);
+const restartMicrophone = document.createElement("button");
+restartMicrophone.id = "restart-microphone";
+restartMicrophone.textContent = "Restart microphone";
+restartMicrophone.hidden = true;
+transport.append(restartMicrophone);
 const liveHint = document.createElement("span");
 liveHint.className = "transport-hint";
 liveHint.textContent = "Your voice. A world of understanding.";
@@ -196,23 +200,38 @@ function options() {
 function render() {
   const waitingForAudio =
     standalone && room?.state === "connected" && !room.metrics.audioConfirmed;
-  el("state").textContent = waitingForAudio
-    ? "Waiting for audio"
-    : (room?.state ?? "Idle");
+  el("state").textContent =
+    startupController || resettingMicrophone
+      ? "Starting"
+      : waitingForAudio
+        ? "Waiting for audio"
+        : (room?.state ?? "Idle");
   el("meeting-title").textContent = room?.name ?? "Ready when you are";
   if (!viewer) {
     const active = room?.state === "connected" || room?.state === "connecting";
     el<HTMLButtonElement>("start").disabled =
-      capturing || changingCapture || testingMicrophone;
-    el("start").textContent = capturing
-      ? waitingForAudio
-        ? "● Listening"
-        : "● Live"
-      : active
-        ? "Reconnect microphone"
-        : "Start meeting";
+      capturing ||
+      changingCapture ||
+      testingMicrophone ||
+      !!startupController ||
+      resettingMicrophone;
+    el("start").textContent =
+      startupController || resettingMicrophone
+        ? "Starting…"
+        : capturing
+          ? waitingForAudio
+            ? "● Listening"
+            : "● Live"
+          : active
+            ? "Reconnect microphone"
+            : "Start meeting";
     el<HTMLButtonElement>("stop").disabled =
-      changingCapture || (!active && room?.state !== "disconnected");
+      startupController || resettingMicrophone
+        ? false
+        : changingCapture || (!active && room?.state !== "disconnected");
+    restartMicrophone.hidden = !startupController && !resettingMicrophone;
+    restartMicrophone.disabled =
+      resettingMicrophone || !!startupController?.signal.aborted;
     el<HTMLButtonElement>("pause").disabled = !capturing;
   }
   renderDiagnostics();
@@ -388,8 +407,15 @@ action("sign-in", async () => {
   await unlock();
   notice("Host authenticated.");
 });
-action("start", async () => {
-  if (!authenticated || changingCapture || capturing || testingMicrophone)
+function startMeeting(): Promise<void> | void {
+  if (
+    !authenticated ||
+    changingCapture ||
+    capturing ||
+    testingMicrophone ||
+    startupController ||
+    resettingMicrophone
+  )
     return;
   if (standalone && !value("key")) {
     settings.showModal();
@@ -397,84 +423,118 @@ action("start", async () => {
     el<HTMLInputElement>("key").focus();
     return;
   }
+  const controller = new AbortController();
+  startupController = controller;
+  const deadline = setTimeout(
+    () =>
+      controller.abort(
+        new Error(
+          "Startup stopped after 10 seconds. Tap Start meeting to try again.",
+        ),
+      ),
+    10000,
+  );
   changingCapture = true;
   render();
   notice("Connecting microphone…");
-  try {
-    await mic.start(
-      value("device"),
-      (pcm, level) => {
-        el<HTMLMeterElement>("meter").value = Math.min(1, level * 5);
-        if (!capturing || paused) return;
-        if (standalone) {
-          local.audio(pcm);
-          return;
-        }
-        if (
-          socket?.readyState === WebSocket.OPEN &&
-          socket.bufferedAmount < 32000
-        )
-          socket.send(pcm);
-        else notice("Audio transport unavailable or behind; audio dropped.");
-      },
-      notice,
-      notice,
-      (resume) => {
-        // The resume call must happen directly in this click handler, without
-        // awaiting permission, cleanup, or any other asynchronous work first.
-        settings.close();
-        activateAudio.hidden = false;
-        activateAudio.disabled = false;
-        activateAudio.focus();
-        return new Promise<void>((resolve, reject) => {
-          activateAudio.onclick = () => {
-            activateAudio.disabled = true;
-            const activating = resume();
-            notice("Activating microphone from your tap…");
-            activating.then(resolve, reject);
-          };
-        });
-      },
-    );
-    notice("Connecting to Soniox…");
-    const data =
-      room?.state === "connected"
-        ? await api("status")
-        : await api("session", options());
-    room = data.room;
-    capturing = true;
-    settings.close();
-    if (!standalone) el<HTMLInputElement>("key").value = "";
-    if (!standalone)
-      el<HTMLInputElement>("share").value = new URL(
-        data.viewerUrl,
-        location.origin,
-      ).href;
-    paused = false;
-    el("pause").textContent = "Pause";
-    el<HTMLButtonElement>("start").disabled = true;
-    el<HTMLButtonElement>("pause").disabled = false;
-    el<HTMLButtonElement>("stop").disabled = false;
-    connect();
-    render();
-    notice(
-      standalone && !room?.metrics.audioConfirmed
-        ? "Microphone connected. Waiting for Soniox to process audio…"
-        : "Meeting live. Audio is being processed by Soniox.",
-    );
-  } catch (error) {
-    capturing = false;
-    await mic.stop();
-    if (standalone) await local.stop();
-    render();
-    throw error;
-  } finally {
-    activateAudio.hidden = true;
-    activateAudio.onclick = null;
-    changingCapture = false;
-    render();
-  }
+  const run = async () => {
+    try {
+      await mic.start(
+        value("device"),
+        (pcm, level) => {
+          el<HTMLMeterElement>("meter").value = Math.min(1, level * 5);
+          if (!capturing || paused) return;
+          if (standalone) {
+            local.audio(pcm);
+            return;
+          }
+          if (
+            socket?.readyState === WebSocket.OPEN &&
+            socket.bufferedAmount < 32000
+          )
+            socket.send(pcm);
+          else notice("Audio transport unavailable or behind; audio dropped.");
+        },
+        notice,
+        notice,
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
+      notice("Connecting to Soniox…");
+      const data = await abortable(
+        room?.state === "connected" ? api("status") : api("session", options()),
+        controller.signal,
+      );
+      controller.signal.throwIfAborted();
+      room = data.room;
+      capturing = true;
+      settings.close();
+      if (!standalone) el<HTMLInputElement>("key").value = "";
+      if (!standalone)
+        el<HTMLInputElement>("share").value = new URL(
+          data.viewerUrl,
+          location.origin,
+        ).href;
+      paused = false;
+      el("pause").textContent = "Pause";
+      el<HTMLButtonElement>("start").disabled = true;
+      el<HTMLButtonElement>("pause").disabled = false;
+      el<HTMLButtonElement>("stop").disabled = false;
+      connect();
+      render();
+      notice(
+        standalone && !room?.metrics.audioConfirmed
+          ? "Microphone connected. Waiting for Soniox to process audio…"
+          : "Meeting live. Audio is being processed by Soniox.",
+      );
+    } catch (error) {
+      capturing = false;
+      await mic.dispose();
+      if (standalone) await local.stop();
+      else await api("stop", {}).catch(() => {});
+      render();
+      if (
+        !controller.signal.aborted ||
+        controller.signal.reason?.message?.includes("10 seconds")
+      )
+        notice(error instanceof Error ? error.message : String(error));
+    } finally {
+      clearTimeout(deadline);
+      if (startupController === controller) startupController = undefined;
+      changingCapture = false;
+      render();
+    }
+  };
+  const task = run();
+  startupTask = task;
+  void task.finally(() => {
+    if (startupTask === task) startupTask = undefined;
+  });
+  return task;
+}
+action("start", () => {
+  captureCommand++;
+  return startMeeting();
 });
+restartMicrophone.onclick = () => {
+  const command = ++captureCommand;
+  resettingMicrophone = true;
+  startupController?.abort(new Error("Restarting microphone."));
+  notice("Restarting microphone…");
+  render();
+  void (async () => {
+    await startupTask;
+    await mic.dispose();
+    if (command !== captureCommand) return;
+    resettingMicrophone = false;
+    return startMeeting();
+  })()
+    .catch((error: unknown) => notice(String(error)))
+    .finally(() => {
+      resettingMicrophone = false;
+      render();
+    });
+};
 action("pause", async () => {
   paused = !paused;
   if (paused) await mic.pause();
@@ -488,6 +548,16 @@ action("pause", async () => {
   );
 });
 action("stop", async () => {
+  captureCommand++;
+  if (startupController || resettingMicrophone) {
+    startupController?.abort(new Error("Startup stopped."));
+    notice("Stopping microphone…");
+    await startupTask;
+    await mic.dispose();
+    notice("Startup stopped.");
+    render();
+    return;
+  }
   if (changingCapture) return;
   changingCapture = true;
   render();

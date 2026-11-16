@@ -3,7 +3,7 @@ import workletUrl from "./pcm-worklet.js?url";
 async function withTimeout<T>(
   promise: Promise<T>,
   message: string | Error,
-  timeoutMs = 30000,
+  timeoutMs = 2000,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -22,7 +22,22 @@ async function withTimeout<T>(
   }
 }
 
-class AudioActivationTimeout extends Error {}
+// Abort every asynchronous startup stage, including native promises that never settle.
+export function abortable<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const cancel = () =>
+      reject(signal.reason ?? new Error("Microphone stopped."));
+    // Always observe the native promise, even when cancellation already won.
+    promise
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", cancel));
+    if (signal.aborted) cancel();
+    else signal.addEventListener("abort", cancel, { once: true });
+  });
+}
 
 export class Microphone {
   private context?: AudioContext;
@@ -32,8 +47,7 @@ export class Microphone {
   private mute?: GainNode;
   private contextCount = 0;
   private startCount = 0;
-  private activationResets = 0;
-  private activationTaps = 0;
+  private startup?: AbortController;
   private stream?: MediaStream;
   private node?: AudioWorkletNode;
   private source?: MediaStreamAudioSourceNode;
@@ -45,40 +59,48 @@ export class Microphone {
     send: (pcm: ArrayBuffer, level: number) => void,
     onInterrupt: (message: string) => void,
     progress: (message: string) => void = () => {},
-    requestActivation?: (resume: () => Promise<void>) => Promise<void>,
+    signal?: AbortSignal,
   ) {
     if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext)
       throw new Error(
-        "Microphone needs localhost or trusted HTTPS. Check certificate trust and browser permissions.",
+        "Microphone needs localhost or trusted HTTPS. Check browser permissions.",
       );
     if (this.starting || this.stream || this.node || this.stopping)
       throw new Error("Microphone is already starting, active, or stopping.");
     this.starting = true;
     this.startCount++;
+    const controller = new AbortController();
+    this.startup = controller;
+    const cancel = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    const timer = signal
+      ? undefined
+      : setTimeout(
+          () =>
+            controller.abort(
+              new Error(
+                "Microphone did not start within 10 seconds. Startup stopped.",
+              ),
+            ),
+          10000,
+        );
     try {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          await this.startCapture(
-            deviceId,
-            send,
-            onInterrupt,
-            progress,
-            attempt === 0 ? 3000 : 20000,
-            attempt === 0 ? undefined : requestActivation,
-          );
-          return;
-        } catch (error) {
-          await this.stop();
-          if (!(error instanceof AudioActivationTimeout) || attempt !== 0)
-            throw error;
-          this.activationResets++;
-          progress("Resetting stalled microphone audio…");
-          // A suspended engine with an unresolved resume is unhealthy. Retire it
-          // instead of carrying pending native operations into another attempt.
-          await this.dispose();
-        }
-      }
+      controller.signal.throwIfAborted();
+      await this.startCapture(
+        deviceId,
+        send,
+        onInterrupt,
+        progress,
+        controller.signal,
+      );
+    } catch (error) {
+      await this.dispose();
+      throw error;
     } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+      if (this.startup === controller) this.startup = undefined;
       this.starting = false;
     }
   }
@@ -88,8 +110,7 @@ export class Microphone {
     send: (pcm: ArrayBuffer, level: number) => void,
     onInterrupt: (message: string) => void,
     progress: (message: string) => void,
-    activationTimeoutMs: number,
-    requestActivation?: (resume: () => Promise<void>) => Promise<void>,
+    signal: AbortSignal,
   ) {
     // Activate audio synchronously during the Start button gesture, before
     // permission prompts or worklet loading can consume user activation.
@@ -121,10 +142,7 @@ export class Microphone {
         return stream;
       });
     try {
-      this.stream = await withTimeout(
-        requestedStream,
-        "Microphone permission timed out. Allow microphone access in Firefox and Android settings, then tap Start meeting again.",
-      );
+      this.stream = await abortable(requestedStream, signal);
     } finally {
       acceptingStream = false;
     }
@@ -140,10 +158,7 @@ export class Microphone {
         if (this.module === loading) this.module = undefined;
       });
     }
-    await withTimeout(
-      this.module,
-      "Microphone audio processing could not load. Reload the page and try again.",
-    );
+    await abortable(this.module, signal);
     this.node = new AudioWorkletNode(this.context, "pcm-processor");
     let receivedAudio!: () => void;
     const firstFrame = new Promise<void>((resolve) => {
@@ -174,37 +189,11 @@ export class Microphone {
     // Connect the complete input-to-destination graph before waiting for the
     // engine. Waiting on resume first leaves startup with no capture graph.
     progress("Activating microphone audio…");
-    try {
-      await withTimeout(
-        this.context.resume(),
-        new AudioActivationTimeout(
-          "Audio activation timed out. Keep this tab visible and retry.",
-        ),
-        activationTimeoutMs,
-      );
-    } catch (error) {
-      if (!(error instanceof AudioActivationTimeout) || !requestActivation)
-        throw error;
-      // Keep the granted input open so a new, explicit user gesture can unlock
-      // playback. An automatic retry cannot supply browser user activation.
-      progress("Tap Activate audio to finish connecting your microphone.");
-      const context = this.context;
-      await withTimeout(
-        requestActivation(() => {
-          this.activationTaps++;
-          return context.resume();
-        }),
-        "Audio activation did not complete. Tap Start meeting to try again.",
-        60000,
-      );
-    }
+    await abortable(this.context.resume(), signal);
     if (this.context.state !== "running")
       throw new Error("Audio is suspended. Keep this tab visible and retry.");
     progress("Waiting for microphone samples…");
-    await withTimeout(
-      firstFrame,
-      "Microphone opened, but Firefox did not deliver audio. Keep this tab visible, stop other audio or calls, then retry. If it persists, fully close and reopen Firefox.",
-    );
+    await abortable(firstFrame, signal);
   }
   diagnostics() {
     const track = this.stream?.getAudioTracks()[0];
@@ -212,8 +201,7 @@ export class Microphone {
       contextState: this.context?.state ?? "closed",
       contextCount: this.contextCount,
       startCount: this.startCount,
-      activationResets: this.activationResets,
-      activationTaps: this.activationTaps,
+      starting: this.starting,
       sampleRate: this.context?.sampleRate,
       trackState: track?.readyState,
       trackMuted: track?.muted,
@@ -230,6 +218,7 @@ export class Microphone {
     await this.context?.resume();
   }
   stop(): Promise<void> {
+    this.startup?.abort(new Error("Microphone stopped."));
     if (this.stopping) return this.stopping;
     const stopping = this.release();
     this.stopping = stopping;

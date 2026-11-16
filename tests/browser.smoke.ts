@@ -154,12 +154,16 @@ try {
   });
   // Exercise standalone capture with a stalled native audio engine.
   await standaloneContext.addInitScript(() => {
-    const stats = window as typeof window & { audioContextCount: number };
+    const stats = window as typeof window & {
+      audioContextCount: number;
+      forceAudioStall: boolean;
+      holdAudioClose?: boolean;
+    };
     stats.audioContextCount = 0;
     // Simulate a stalled native engine that only recovers after it is closed.
     // This checks the recovery flow, not the actual Android audio backend.
     let captureGranted = false;
-    let needsReset = true;
+    stats.forceAudioStall = true;
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
       navigator.mediaDevices,
     );
@@ -170,7 +174,6 @@ try {
         const stop = track.stop.bind(track);
         track.stop = () => {
           captureGranted = false;
-          needsReset = true;
           stop();
         };
       }
@@ -178,13 +181,18 @@ try {
     };
     const NativeContext = window.AudioContext;
     window.AudioContext = class extends NativeContext {
+      private blocked = false;
       resume() {
-        if (!captureGranted || needsReset) return new Promise<void>(() => {});
+        if (stats.forceAudioStall) this.blocked = true;
+        if (!captureGranted || this.blocked) return new Promise<void>(() => {});
         return super.resume();
       }
       close() {
-        needsReset = false;
-        return super.close();
+        stats.forceAudioStall = false;
+        const closed = super.close();
+        return stats.holdAudioClose
+          ? closed.then(() => new Promise<void>(() => {}))
+          : closed;
       }
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
@@ -254,6 +262,19 @@ try {
     },
   );
   const device = await standaloneContext.newPage();
+  const startStalled = async () => {
+    await device.evaluate(() => {
+      (window as typeof window & { forceAudioStall: boolean }).forceAudioStall =
+        true;
+    });
+    await device.locator("#start").click();
+    await device
+      .getByText("Activating microphone audio…", { exact: true })
+      .waitFor();
+    assert.equal(await device.locator("#stop").isEnabled(), true);
+    assert.equal(await device.locator("#restart-microphone").isVisible(), true);
+  };
+
   const standaloneErrors: string[] = [];
   const apiRequests: string[] = [];
   device.on("pageerror", (error) => standaloneErrors.push(error.message));
@@ -320,8 +341,20 @@ try {
       "Capture test must not create an audio engine",
     );
     assert.equal(before.trackState, "live");
+    await device.evaluate(() => {
+      (window as typeof window & { forceAudioStall: boolean }).forceAudioStall =
+        true;
+    });
     await device
       .getByRole("button", { name: "2. Test audio processing", exact: true })
+      .click();
+    await device.waitForFunction(
+      () =>
+        JSON.parse(document.querySelector("[data-results]")!.textContent!)
+          .contextStateBeforeResume !== undefined,
+    );
+    await device
+      .getByRole("button", { name: "Restart microphone test", exact: true })
       .click();
     await device
       .getByText("Microphone test detected audio samples.", {
@@ -359,7 +392,56 @@ try {
     "synthetic-personal-key",
   );
   await device.locator(".close-settings").click();
-  await device.locator("#start").click();
+  await startStalled();
+  await device.locator("#stop").click();
+  await device.getByText("Startup stopped.", { exact: true }).waitFor();
+  assert.equal(await device.locator("#start").isEnabled(), true);
+  assert.equal(await device.locator("#restart-microphone").isVisible(), false);
+  assert.equal(standaloneConnections, 0);
+  await startStalled();
+  await device.evaluate(() => {
+    (window as typeof window & { holdAudioClose: boolean }).holdAudioClose =
+      true;
+  });
+  await device.locator("#restart-microphone").click();
+  await device.locator("#stop").click();
+  await device.getByText("Startup stopped.", { exact: true }).waitFor();
+  await device.evaluate(() => {
+    (window as typeof window & { holdAudioClose: boolean }).holdAudioClose =
+      false;
+  });
+  assert.equal(await device.locator("#restart-microphone").isVisible(), false);
+  assert.equal(await device.locator("#start").isEnabled(), true);
+  assert.equal(
+    standaloneConnections,
+    0,
+    "Stop during reset must prevent the queued restart",
+  );
+  await startStalled();
+  const contextCountBeforeDeadline = await device.evaluate(
+    () =>
+      (window as typeof window & { audioContextCount: number })
+        .audioContextCount,
+  );
+  await device
+    .getByText(
+      "Startup stopped after 10 seconds. Tap Start meeting to try again.",
+      { exact: true },
+    )
+    .waitFor();
+  assert.equal(await device.locator("#start").isEnabled(), true);
+  assert.equal(
+    await device.evaluate(
+      () =>
+        (window as typeof window & { audioContextCount: number })
+          .audioContextCount,
+    ),
+    contextCountBeforeDeadline,
+    "The deadline must stop, never retry automatically",
+  );
+  assert.equal(standaloneConnections, 0);
+  await startStalled();
+  await device.locator("#restart-microphone").click();
   await device
     .getByText("Microphone connected. Waiting for Soniox to process audio…", {
       exact: true,
@@ -380,8 +462,8 @@ try {
     (await device.locator("#diagnostics").textContent()) ?? "{}",
   );
   assert.ok(diagnostics.capture.receivedChunks > 0);
-  assert.equal(diagnostics.capture.activationResets, 1);
-  assert.equal(diagnostics.capture.startCount, 1);
+  assert.equal(diagnostics.capture.contextState, "running");
+  assert.equal(await device.locator("#restart-microphone").isVisible(), false);
   assert.ok(diagnostics.provider.audioBytesSent > 0);
   assert.equal(diagnostics.provider.processedAudioMs, 1000);
   await device.locator(".close-settings").click();
@@ -506,7 +588,8 @@ try {
     .waitFor();
   for (const reload of [...Array<boolean>(10).fill(false), true]) {
     if (reload) await device.reload();
-    await device.locator("#start").click();
+    await startStalled();
+    await device.locator("#restart-microphone").click();
     await device
       .getByText("Meeting live. Audio is being processed by Soniox.", {
         exact: true,
@@ -516,19 +599,10 @@ try {
     const recovered = JSON.parse(
       (await device.locator("#diagnostics").textContent()) ?? "{}",
     );
+    assert.equal(recovered.capture.contextState, "running");
     assert.equal(
-      recovered.capture.activationResets,
-      recovered.capture.startCount,
-      "Each stalled native engine must be replaced automatically",
-    );
-    assert.equal(
-      await device.evaluate(
-        () =>
-          (window as typeof window & { audioContextCount: number })
-            .audioContextCount,
-      ),
-      recovered.capture.startCount + 1,
-      "Only stalled engines should be replaced",
+      await device.locator("#restart-microphone").isVisible(),
+      false,
     );
     await device.locator("#stop").click();
     await device
@@ -548,7 +622,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: activation deliberately stalled until engine close, automatic recovery with a fresh engine, PCM startup order, processing confirmation, pause/resume, ten same-page restarts and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: activation deliberately stalled until engine close, manual Restart microphone recovery, cancellable Stop and ten-second deadline, PCM startup order, processing confirmation, pause/resume, ten same-page restarts and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();

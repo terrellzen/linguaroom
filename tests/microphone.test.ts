@@ -8,6 +8,8 @@ function setup({
   pendingPermission = false,
   permissionDenied = false,
   pendingActivation = false,
+  pendingModule = false,
+  pendingSamples = false,
   pendingSuspend = false,
   pendingClose = false,
   activationNeedsPermission = false,
@@ -49,6 +51,7 @@ function setup({
     audioWorklet = {
       addModule: async () => {
         events.push("module");
+        if (pendingModule) await new Promise<void>(() => {});
       },
     };
     resume() {
@@ -84,9 +87,10 @@ function setup({
     createMediaStreamSource() {
       return {
         connect() {
-          worklet?.port.onmessage?.({
-            data: { pcm: new ArrayBuffer(3200), level: 0.5 },
-          });
+          if (!pendingSamples)
+            worklet?.port.onmessage?.({
+              data: { pcm: new ArrayBuffer(3200), level: 0.5 },
+            });
         },
         disconnect() {},
       };
@@ -102,7 +106,7 @@ function setup({
   }
   const source = readFileSync("apps/web/src/audio/microphone.ts", "utf8")
     .replace(/^import .*;\n/, 'const workletUrl = "worklet.js";\n')
-    .replace("export class Microphone", "class Microphone");
+    .replace(/export /g, "");
   const scope = vm.createContext({
     navigator: {
       mediaDevices: {
@@ -123,6 +127,7 @@ function setup({
       },
     },
     window: { isSecureContext: true },
+    AbortController,
     AudioContext: Context,
     AudioWorkletNode: class {
       port = {
@@ -160,8 +165,8 @@ function setup({
 }
 const ignore = () => {};
 
-test("twenty meetings reuse one audio context and module, with fresh input processors", async () => {
-  const { mic, events, contexts, timers } = setup();
+test("healthy meetings reuse one engine with fresh input processors", async () => {
+  const { mic, contexts, timers, events } = setup();
   for (let i = 0; i < 20; i++) {
     await mic.start("", ignore, ignore);
     assert.equal(mic.diagnostics().receivedChunks, 1);
@@ -169,212 +174,100 @@ test("twenty meetings reuse one audio context and module, with fresh input proce
   }
   assert.equal(contexts(), 1);
   assert.equal(events.filter((event) => event === "module").length, 1);
-  for (const event of [
-    "node",
-    "track stopped",
-    "processor stopped",
-    "port closed",
-    "suspend",
-  ])
-    assert.equal(events.filter((value) => value === event).length, 20);
-  assert.equal(events.includes("close"), false);
+  assert.equal(events.filter((event) => event === "track stopped").length, 20);
   assert.equal(timers.size, 0);
-  await mic.dispose();
-  assert.equal(events.filter((event) => event === "close").length, 1);
 });
 
-test("processor graph is connected before waiting for engine activation", async () => {
-  const { mic, events, activate } = setup({ pendingActivation: true });
-  const starting = mic.start("", ignore, ignore);
+for (const stage of [
+  "pendingPermission",
+  "pendingActivation",
+  "pendingModule",
+  "pendingSamples",
+] as const) {
+  test(`Stop cancels ${stage} without waiting for Firefox`, async () => {
+    const { mic, events, timers, grant } = setup({ [stage]: true });
+    const started = mic.start("", ignore, ignore);
+    const rejected = assert.rejects(started, /Microphone stopped/);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await mic.stop();
+    await rejected;
+    if (stage === "pendingPermission") {
+      grant();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(events.filter((event) => event === "permission").length, 1);
+    assert.ok(events.includes("track stopped"));
+    assert.equal(mic.diagnostics().contextState, "closed");
+    assert.equal(timers.size, 0);
+  });
+}
+
+test("ten-second deadline stops activation without an automatic retry", async () => {
+  const { mic, events, contexts, timers } = setup({ pendingActivation: true });
+  const started = mic.start("", ignore, ignore);
+  const rejected = assert.rejects(started, /10 seconds/);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(events, [
-    "resume",
-    "permission",
-    "module",
-    "node",
-    "resume",
-  ]);
-  activate();
-  await starting;
-  assert.deepEqual(events, [
-    "resume",
-    "permission",
-    "module",
-    "node",
-    "resume",
-  ]);
-  assert.equal(mic.diagnostics().peakLevel, 0.5);
+  [...timers].forEach((callback) => callback());
+  await rejected;
+  assert.equal(contexts(), 1);
+  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(timers.size, 0);
+});
+
+test("manual replacement retires a stalled engine and starts fresh", async () => {
+  const { mic, contexts, events, timers } = setup({
+    activationNeedsFreshContext: true,
+  });
+  const started = mic.start("", ignore, ignore);
+  const rejected = assert.rejects(started, /Microphone stopped/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await mic.dispose();
+  await rejected;
+  await mic.start("", ignore, ignore);
+  assert.equal(contexts(), 2);
+  assert.equal(events.filter((event) => event === "close").length, 1);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(timers.size, 0);
   await mic.stop();
 });
 
-test("duplicate stop shares shutdown and a new start cannot overlap it", async () => {
-  const { mic, finishSuspend, contexts } = setup({ pendingSuspend: true });
-  await mic.start("", ignore, ignore);
-  const stopping = mic.stop();
-  assert.equal(mic.stop(), stopping);
-  await assert.rejects(mic.start("", ignore, ignore), /stopping/);
-  finishSuspend();
-  await stopping;
-  await mic.start("", ignore, ignore);
-  assert.equal(contexts(), 1);
-  const stoppingAgain = mic.stop();
-  finishSuspend();
-  await stoppingAgain;
-});
-
-test("permission timeout releases a late stream without replacing the engine", async () => {
-  const { mic, events, timers, grant, contexts } = setup({
-    pendingPermission: true,
-  });
-  const started = mic.start("", ignore, ignore);
-  const rejected = assert.rejects(started, /Microphone permission timed out/);
-  [...timers].forEach((callback) => callback());
-  await rejected;
-  grant();
+test("external cancellation owns the single startup deadline", async () => {
+  const { mic, timers } = setup({ pendingActivation: true });
+  const controller = new AbortController();
+  const started = mic.start("", ignore, ignore, ignore, controller.signal);
+  const rejected = assert.rejects(started, /User stopped/);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(events.includes("track stopped"));
-  assert.equal(contexts(), 1);
+  assert.equal(timers.size, 0);
+  controller.abort(new Error("User stopped"));
+  await rejected;
   assert.equal(timers.size, 0);
 });
 
-test("blocked activation releases capture and reports the timeout", async () => {
-  const { mic, events, timers } = setup({ pendingActivation: true });
-  const started = mic.start("", ignore, ignore);
-  const rejected = assert.rejects(started, /Audio activation timed out/);
-  for (let i = 0; i < 10; i++) await Promise.resolve();
-  for (let i = 0; i < 3; i++) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    [...timers].forEach((callback) => callback());
-  }
-  await rejected;
-  assert.ok(events.includes("track stopped"));
-  assert.equal(events.filter((event) => event === "permission").length, 2);
-  assert.equal(events.includes("module"), true);
+test("permission denial is reported without a retry", async () => {
+  const { mic, events, timers } = setup({ permissionDenied: true });
+  await assert.rejects(mic.start("", ignore, ignore), /Permission denied/);
+  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(timers.size, 0);
 });
 
-test("disposal bounds a stalled browser close and clears page ownership", async () => {
+test("a pending pre-permission resume does not block the connected graph", async () => {
+  const { mic, timers } = setup({
+    activationNeedsPermission: true,
+    activationNeedsGraph: true,
+  });
+  await mic.start("", ignore, ignore);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(timers.size, 0);
+  await mic.stop();
+});
+
+test("cleanup is bounded when native close never resolves", async () => {
   const { mic, timers } = setup({ pendingClose: true });
   await mic.start("", ignore, ignore);
   const disposing = mic.dispose();
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
   [...timers].forEach((callback) => callback());
   await disposing;
   assert.equal(mic.diagnostics().contextState, "closed");
   assert.equal(timers.size, 0);
-});
-
-test("first resume may stay pending until permission; the same Start succeeds", async () => {
-  const { mic, events, contexts, timers, grant } = setup({
-    activationNeedsPermission: true,
-    pendingPermission: true,
-  });
-  const started = mic.start("", ignore, ignore);
-  await Promise.resolve();
-  assert.deepEqual(events, ["resume", "permission"]);
-  grant();
-  await started;
-  assert.deepEqual(events, [
-    "resume",
-    "permission",
-    "module",
-    "node",
-    "resume",
-  ]);
-  assert.equal(contexts(), 1);
-  assert.equal(mic.diagnostics().startCount, 1);
-  assert.equal(mic.diagnostics().receivedChunks, 1);
-  assert.equal(timers.size, 0);
-  await mic.stop();
-});
-
-test("failed activation retires its engine and recovers inside a single Start", async () => {
-  const { mic, events, contexts, timers } = setup({
-    activationNeedsReset: true,
-  });
-  const started = mic.start("", ignore, ignore);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(events.filter((event) => event === "permission").length, 1);
-  assert.equal(events.includes("node"), true);
-  [...timers].forEach((callback) => callback());
-  await started;
-  assert.equal(events.filter((event) => event === "permission").length, 2);
-  assert.equal(events.filter((event) => event === "node").length, 2);
-  assert.equal(mic.diagnostics().activationResets, 1);
-  assert.equal(mic.diagnostics().startCount, 1);
-  assert.equal(mic.diagnostics().receivedChunks, 1);
-  assert.equal(contexts(), 2);
-  assert.equal(timers.size, 0);
-  await mic.stop();
-});
-
-test("permission denial does not trigger another capture request", async () => {
-  const { mic, events, timers } = setup({ permissionDenied: true });
-  await assert.rejects(mic.start("", ignore, ignore), /Permission denied/);
-  assert.equal(events.filter((event) => event === "permission").length, 1);
-  assert.equal(mic.diagnostics().activationResets, 0);
-  assert.equal(timers.size, 0);
-});
-
-test("a fresh activation gesture can unlock the replacement engine", async () => {
-  const { mic, events, timers, activate } = setup({ pendingActivation: true });
-  let resumeFromTap: (() => Promise<void>) | undefined;
-  const started = mic.start(
-    "",
-    ignore,
-    ignore,
-    ignore,
-    (resume: () => Promise<void>) => {
-      resumeFromTap = resume;
-      return new Promise<void>((resolve, reject) => {
-        // The test controls the tap separately from the initial timeout.
-        tap = () => resume().then(resolve, reject);
-      });
-    },
-  );
-  let tap!: () => void;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  [...timers].forEach((callback) => callback());
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  [...timers].forEach((callback) => callback());
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(resumeFromTap);
-  assert.equal(events.filter((event) => event === "track stopped").length, 1);
-  tap();
-  activate();
-  await started;
-  assert.equal(events.filter((event) => event === "permission").length, 2);
-  assert.equal(mic.diagnostics().receivedChunks, 1);
-  assert.equal(timers.size, 0);
-  await mic.stop();
-});
-
-test("activation requiring a connected graph succeeds on the first Start", async () => {
-  const { mic, events, timers } = setup({ activationNeedsGraph: true });
-  await mic.start("", ignore, ignore);
-  assert.equal(mic.diagnostics().startCount, 1);
-  assert.equal(mic.diagnostics().activationResets, 0);
-  assert.equal(events.filter((event) => event === "permission").length, 1);
-  assert.equal(mic.diagnostics().receivedChunks, 1);
-  assert.equal(timers.size, 0);
-  await mic.stop();
-});
-
-test("a permanently stalled first engine is replaced before asking for another tap", async () => {
-  const { mic, timers, events, contexts } = setup({
-    activationNeedsFreshContext: true,
-  });
-  let prompts = 0;
-  const started = mic.start("", ignore, ignore, ignore, () => {
-    prompts++;
-    return new Promise<void>(() => {});
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  [...timers].forEach((callback) => callback());
-  await started;
-  assert.equal(contexts(), 2);
-  assert.equal(prompts, 0);
-  assert.equal(events.filter((event) => event === "close").length, 1);
-  assert.equal(mic.diagnostics().receivedChunks, 1);
-  assert.equal(timers.size, 0);
-  await mic.stop();
 });

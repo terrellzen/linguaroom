@@ -5,12 +5,13 @@ export function microphoneTest(
   onBusy: (active: boolean) => void,
   deviceId: () => string,
 ) {
-  container.innerHTML = `<summary>Microphone test</summary><p>No API key needed. Audio stays on this device and is discarded. First open the microphone, then test audio processing.</p><label>Capture settings<select data-mode><option value="default">Browser defaults</option><option value="meeting">Meeting settings (mono, echo cancellation, noise suppression)</option></select></label><div class="button-row"><button data-open>1. Open microphone</button><button data-process disabled>2. Test audio processing</button><button data-stop disabled>Stop test</button><button data-copy>Copy test results</button></div><label>Test input level<meter data-level min="0" max="1" value="0"></meter></label><p data-status role="status">Ready to test.</p><pre data-results></pre>`;
+  container.innerHTML = `<summary>Microphone test</summary><p>No API key needed. Audio stays on this device and is discarded. First open the microphone, then test audio processing.</p><label>Capture settings<select data-mode><option value="default">Browser defaults</option><option value="meeting">Meeting settings (mono, echo cancellation, noise suppression)</option></select></label><div class="button-row"><button data-open>1. Open microphone</button><button data-process disabled>2. Test audio processing</button><button data-restart disabled>Restart microphone test</button><button data-stop disabled>Stop test</button><button data-copy>Copy test results</button></div><label>Test input level<meter data-level min="0" max="1" value="0"></meter></label><p data-status role="status">Ready to test.</p><pre data-results></pre>`;
   const find = <T extends HTMLElement>(selector: string) =>
     container.querySelector<T>(selector)!;
   const open = find<HTMLButtonElement>("[data-open]");
   const process = find<HTMLButtonElement>("[data-process]");
   const stopButton = find<HTMLButtonElement>("[data-stop]");
+  const restart = find<HTMLButtonElement>("[data-restart]");
   const mode = find<HTMLSelectElement>("[data-mode]");
   const meter = find<HTMLMeterElement>("[data-level]");
   let generation = 0;
@@ -20,7 +21,7 @@ export function microphoneTest(
   let recorder: MediaRecorder | undefined;
   let interval: ReturnType<typeof setInterval> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
-  let activationDeadline: ReturnType<typeof setTimeout> | undefined;
+  let processAfterOpen = false;
   let results: Record<string, unknown> = {};
   const display = () => {
     if (stream) {
@@ -58,10 +59,11 @@ export function microphoneTest(
     if (generation === run) display();
   };
   const stop = () => {
+    processAfterOpen = false;
     generation++;
     clearInterval(interval);
     clearTimeout(deadline);
-    clearTimeout(activationDeadline);
+    clearTimeout(deadline);
     display();
     if (recorder && recorder.state !== "inactive") recorder.stop();
     recorder = undefined;
@@ -77,6 +79,7 @@ export function microphoneTest(
     mode.disabled = false;
     process.disabled = true;
     stopButton.disabled = true;
+    restart.disabled = true;
     if (active) onBusy(false);
     active = false;
     results.stopped = true;
@@ -111,12 +114,13 @@ export function microphoneTest(
     open.disabled = true;
     mode.disabled = true;
     stopButton.disabled = false;
+    restart.disabled = false;
     status("Opening microphone without an audio engine…");
     void permission("permissionBefore", run);
     deadline = setTimeout(() => {
-      status("Microphone request timed out.");
+      status("Microphone test stopped after 10 seconds without starting.");
       stop();
-    }, 30000);
+    }, 10000);
     const selected = deviceId();
     // Invoke capture directly from the tap, without awaiting Permissions.query.
     void navigator.mediaDevices
@@ -158,9 +162,13 @@ export function microphoneTest(
         }
         interval = setInterval(display, 250);
         deadline = setTimeout(() => {
-          status("Test finished after 30 seconds. Results are kept below.");
+          status("Microphone test stopped after 10 seconds without starting.");
           stop();
-        }, 30000);
+        }, 10000);
+        if (processAfterOpen) {
+          processAfterOpen = false;
+          startProcessing();
+        }
       })
       .catch((error: unknown) => {
         if (generation !== run) return;
@@ -169,7 +177,7 @@ export function microphoneTest(
         stop();
       });
   };
-  const startProcessing = (retry = false) => {
+  const startProcessing = () => {
     if (!stream || !active) return;
     process.disabled = true;
     const run = generation;
@@ -198,51 +206,28 @@ export function microphoneTest(
         if (
           rms > 0 &&
           results.stage !== "Microphone test detected audio samples."
-        )
+        ) {
+          clearTimeout(deadline);
           status("Microphone test detected audio samples.");
+        }
         display();
       }, 100);
       context.onstatechange = display;
       status("Starting audio processing from your tap…");
-      activationDeadline = setTimeout(() => {
-        if (generation !== run || context !== engine) return;
-        if (retry) {
-          status(
-            "Audio engine is still suspended after replacement. Copy the test results.",
-          );
-          return;
-        }
-        results.firstEngine = {
-          state: engine.state,
-          audioTimeSeconds: engine.currentTime,
-        };
-        results.activationResets = 1;
-        status("Replacing stalled audio engine…");
-        clearInterval(interval);
-        engine.onstatechange = null;
-        context = undefined;
-        // Bound cleanup even if Firefox never settles its native close promise.
-        let timeout: ReturnType<typeof setTimeout>;
-        void Promise.race([
-          engine.close().catch(() => {}),
-          new Promise<void>((resolve) => {
-            timeout = setTimeout(resolve, 2000);
-          }),
-        ]).then(() => {
-          clearTimeout(timeout);
-          if (generation === run) startProcessing(true);
-        });
-      }, 3000);
+      clearTimeout(deadline);
+      deadline = setTimeout(() => {
+        status("Microphone test stopped after 10 seconds without starting.");
+        stop();
+      }, 10000);
       void resuming.then(
         () => {
           if (generation === run && context === engine) {
-            clearTimeout(activationDeadline);
             status("Audio engine running. Speak to check for audio samples.");
           }
         },
         (error: unknown) => {
           if (generation === run && context === engine) {
-            clearTimeout(activationDeadline);
+            clearTimeout(deadline);
             results.error = String(error);
             status("Audio processing failed. See results below.");
           }
@@ -254,6 +239,12 @@ export function microphoneTest(
     }
   };
   process.onclick = () => startProcessing();
+  restart.onclick = () => {
+    const wasProcessing = !!context;
+    stop();
+    processAfterOpen = wasProcessing;
+    open.click();
+  };
   find<HTMLButtonElement>("[data-copy]").onclick = () => {
     void navigator.clipboard.writeText(JSON.stringify(results, null, 2)).then(
       () => {
