@@ -273,6 +273,18 @@ try {
       .waitFor();
     assert.equal(await device.locator("#stop").isEnabled(), true);
     assert.equal(await device.locator("#restart-microphone").isVisible(), true);
+    for (const selector of ["#restart-microphone", "#stop"]) {
+      const bounds = await device.locator(selector).boundingBox();
+      const viewport = device.viewportSize()!;
+      assert.ok(
+        bounds &&
+          bounds.x >= 0 &&
+          bounds.y >= 0 &&
+          bounds.x + bounds.width <= viewport.width &&
+          bounds.y + bounds.height <= viewport.height,
+        "Startup controls must fit the viewport",
+      );
+    }
   };
 
   const standaloneErrors: string[] = [];
@@ -393,6 +405,18 @@ try {
   );
   await device.locator(".close-settings").click();
   await startStalled();
+  await device.setViewportSize({ width: 844, height: 390 });
+  for (const selector of ["#restart-microphone", "#stop"]) {
+    const bounds = await device.locator(selector).boundingBox();
+    assert.ok(
+      bounds &&
+        bounds.x >= 0 &&
+        bounds.x + bounds.width <= 844 &&
+        bounds.y + bounds.height <= 390,
+      "Startup controls must fit landscape",
+    );
+  }
+  await device.setViewportSize({ width: 390, height: 844 });
   await device.locator("#stop").click();
   await device.getByText("Startup stopped.", { exact: true }).waitFor();
   assert.equal(await device.locator("#start").isEnabled(), true);

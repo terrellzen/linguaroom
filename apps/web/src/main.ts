@@ -78,7 +78,9 @@ const restartMicrophone = document.createElement("button");
 restartMicrophone.id = "restart-microphone";
 restartMicrophone.textContent = "Restart microphone";
 restartMicrophone.hidden = true;
-transport.append(restartMicrophone);
+transport
+  .querySelector("#stop")!
+  .insertAdjacentElement("beforebegin", restartMicrophone);
 const liveHint = document.createElement("span");
 liveHint.className = "transport-hint";
 liveHint.textContent = "Your voice. A world of understanding.";
@@ -229,7 +231,10 @@ function render() {
       startupController || resettingMicrophone
         ? false
         : changingCapture || (!active && room?.state !== "disconnected");
-    restartMicrophone.hidden = !startupController && !resettingMicrophone;
+    const starting = !!startupController || resettingMicrophone;
+    el("start").hidden = starting;
+    el("pause").hidden = starting;
+    restartMicrophone.hidden = !starting;
     restartMicrophone.disabled =
       resettingMicrophone || !!startupController?.signal.aborted;
     el<HTMLButtonElement>("pause").disabled = !capturing;
