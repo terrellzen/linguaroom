@@ -105,6 +105,64 @@ const micTest = microphoneTest(
 function el<T extends HTMLElement = HTMLElement>(id: string) {
   return document.getElementById(id) as T;
 }
+const captionsViewport = el("captions");
+const scrollToBottom = document.createElement("button");
+scrollToBottom.id = "scroll-to-bottom";
+scrollToBottom.textContent = "↓ Scroll to bottom";
+scrollToBottom.setAttribute("aria-controls", "captions");
+scrollToBottom.hidden = true;
+el("captions").parentElement!.append(scrollToBottom);
+let followCaptions = true;
+const atCaptionBottom = () =>
+  captionsViewport.scrollHeight -
+    captionsViewport.clientHeight -
+    captionsViewport.scrollTop <=
+  2;
+function updateScrollButton() {
+  scrollToBottom.hidden = followCaptions || atCaptionBottom();
+  const panel = captionsViewport.parentElement!.getBoundingClientRect();
+  scrollToBottom.style.bottom = `${panel.bottom - captionsViewport.getBoundingClientRect().bottom + 8}px`;
+}
+captionsViewport.addEventListener(
+  "scroll",
+  () => {
+    followCaptions = atCaptionBottom();
+    updateScrollButton();
+  },
+  { passive: true },
+);
+scrollToBottom.onclick = () => {
+  followCaptions = true;
+  captionsViewport.scrollTop = captionsViewport.scrollHeight;
+  updateScrollButton();
+};
+new ResizeObserver(() => {
+  if (followCaptions)
+    captionsViewport.scrollTop = captionsViewport.scrollHeight;
+  updateScrollButton();
+}).observe(captionsViewport);
+function preserveCaptionPosition() {
+  const following = followCaptions;
+  const top = captionsViewport.getBoundingClientRect().top;
+  const anchor = following
+    ? undefined
+    : Array.from(
+        captionsViewport.querySelectorAll<HTMLElement>("[data-segment]"),
+      ).find((row) => !row.hidden && row.getBoundingClientRect().bottom > top);
+  const offset = anchor ? anchor.getBoundingClientRect().top - top : 0;
+  return () => {
+    if (following) captionsViewport.scrollTop = captionsViewport.scrollHeight;
+    else if (anchor?.isConnected) {
+      const movement =
+        anchor.getBoundingClientRect().top -
+        captionsViewport.getBoundingClientRect().top -
+        offset;
+      if (Math.abs(movement) > 0.5) captionsViewport.scrollTop += movement;
+    } else if (anchor) captionsViewport.scrollTop = 0;
+    if (atCaptionBottom()) followCaptions = true;
+    updateScrollButton();
+  };
+}
 function value(id: string) {
   return el<HTMLInputElement>(id).value;
 }
@@ -242,6 +300,7 @@ function render() {
   renderDiagnostics();
   if (!room) return;
   const container = el("captions");
+  const finishScroll = preserveCaptionPosition();
   if (room.segments.length) container.querySelector(".empty")?.remove();
   const visible = room.segments.slice(-300);
   const keep = new Set(visible.map((s) => s.id));
@@ -301,7 +360,7 @@ function render() {
     text.textContent = s.translated || s.original;
     row.append(meta, text);
   }
-  container.scrollTop = container.scrollHeight;
+  finishScroll();
 }
 function connect() {
   if (standalone) return;

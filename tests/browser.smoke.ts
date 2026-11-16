@@ -12,11 +12,13 @@ class BrowserMock implements SpeechProvider {
   readonly id = "browser-test-mock";
   connections = 0;
   frames = 0;
+  callbacks?: ProviderCallbacks;
   capabilities() {
     return { translation: true, diarization: true, languages: ["bg", "en"] };
   }
   async initialize() {}
   async create(_key: string, options: Start, cb: ProviderCallbacks) {
+    this.callbacks = cb;
     this.connections++;
     cb.state("connected");
     return {
@@ -139,6 +141,78 @@ try {
     ),
     true,
   );
+  const caption = (id: string, text: string, revision = 1) =>
+    provider.callbacks!.segment({
+      id,
+      revision,
+      final: true,
+      original: "",
+      translated: text,
+      targetLanguage: "en",
+      sourceLanguage: "bg",
+      speakerId: "1",
+      channel: "translation",
+    });
+  for (let i = 0; i < 40; i++)
+    caption(
+      `scroll-${i}`,
+      `Scrolling caption ${i}. More conversation to read.`,
+    );
+  for (const [index, target] of [page, viewer].entries()) {
+    await target.locator('[data-segment="scroll-39"]').waitFor();
+    await target.waitForFunction(() => {
+      const area = document.querySelector("#captions")!;
+      return area.scrollHeight - area.clientHeight - area.scrollTop <= 2;
+    });
+    await target.locator("#captions").evaluate((area) => {
+      area.scrollTop = (area.scrollHeight - area.clientHeight) / 2;
+    });
+    await target.locator("#scroll-to-bottom").waitFor({ state: "visible" });
+    const anchor = await target.locator("#captions").evaluate((area) => {
+      const top = area.getBoundingClientRect().top;
+      const row = Array.from(
+        area.querySelectorAll<HTMLElement>("[data-segment]"),
+      ).find(
+        (item) => !item.hidden && item.getBoundingClientRect().bottom > top,
+      )!;
+      return {
+        id: row.dataset.segment!,
+        offset: row.getBoundingClientRect().top - top,
+      };
+    });
+    caption(
+      "scroll-0",
+      "An earlier caption has been revised. ".repeat(20 + index * 20),
+      2 + index,
+    );
+    caption(
+      `scroll-update-${index}`,
+      "New captions must not pull a reader down.",
+    );
+    await target.locator(`[data-segment="scroll-update-${index}"]`).waitFor();
+    const offset = await target.locator("#captions").evaluate((area, id) => {
+      const row = Array.from(
+        area.querySelectorAll<HTMLElement>("[data-segment]"),
+      ).find((item) => item.dataset.segment === id)!;
+      return row.getBoundingClientRect().top - area.getBoundingClientRect().top;
+    }, anchor.id);
+    assert.ok(
+      Math.abs(offset - anchor.offset) <= 2,
+      "Incoming captions and revisions must preserve the reader's position",
+    );
+    await target.getByRole("button", { name: "Scroll to bottom" }).click();
+    await target.locator("#scroll-to-bottom").waitFor({ state: "hidden" });
+    caption(`scroll-follow-${index}`, "Following the newest captions again.");
+    await target.locator(`[data-segment="scroll-follow-${index}"]`).waitFor();
+    assert.ok(
+      await target
+        .locator("#captions")
+        .evaluate(
+          (area) => area.scrollHeight - area.clientHeight - area.scrollTop <= 2,
+        ),
+      "Jumping to the bottom must resume following new captions",
+    );
+  }
   await page.locator("#stop").click();
   await page
     .getByText("Meeting ended. API key reference discarded.", { exact: true })
