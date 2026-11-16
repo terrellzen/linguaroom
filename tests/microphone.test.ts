@@ -13,6 +13,7 @@ function setup({
   activationNeedsPermission = false,
   activationNeedsReset = false,
   activationNeedsGraph = false,
+  activationNeedsFreshContext = false,
 } = {}) {
   const events: string[] = [];
   const timers = new Set<() => void>();
@@ -40,8 +41,10 @@ function setup({
   };
   class Context {
     state = "suspended";
+    readonly index: number;
     constructor() {
       contexts++;
+      this.index = contexts;
     }
     audioWorklet = {
       addModule: async () => {
@@ -50,6 +53,8 @@ function setup({
     };
     resume() {
       events.push("resume");
+      if (activationNeedsFreshContext && this.index === 1)
+        return new Promise<void>(() => {});
       if (activationNeedsGraph && !graphConnected)
         return new Promise<void>(() => {});
       if (activationNeedsReset && !inputReset)
@@ -282,7 +287,7 @@ test("first resume may stay pending until permission; the same Start succeeds", 
   await mic.stop();
 });
 
-test("a device needing failed-start cleanup recovers inside a single Start", async () => {
+test("failed activation retires its engine and recovers inside a single Start", async () => {
   const { mic, events, contexts, timers } = setup({
     activationNeedsReset: true,
   });
@@ -297,7 +302,7 @@ test("a device needing failed-start cleanup recovers inside a single Start", asy
   assert.equal(mic.diagnostics().activationResets, 1);
   assert.equal(mic.diagnostics().startCount, 1);
   assert.equal(mic.diagnostics().receivedChunks, 1);
-  assert.equal(contexts(), 1);
+  assert.equal(contexts(), 2);
   assert.equal(timers.size, 0);
   await mic.stop();
 });
@@ -310,7 +315,7 @@ test("permission denial does not trigger another capture request", async () => {
   assert.equal(timers.size, 0);
 });
 
-test("a fresh activation gesture unlocks the granted input without reset", async () => {
+test("a fresh activation gesture can unlock the replacement engine", async () => {
   const { mic, events, timers, activate } = setup({ pendingActivation: true });
   let resumeFromTap: (() => Promise<void>) | undefined;
   const started = mic.start(
@@ -330,12 +335,14 @@ test("a fresh activation gesture unlocks the granted input without reset", async
   await new Promise<void>((resolve) => setImmediate(resolve));
   [...timers].forEach((callback) => callback());
   await new Promise<void>((resolve) => setImmediate(resolve));
+  [...timers].forEach((callback) => callback());
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.ok(resumeFromTap);
-  assert.equal(events.includes("track stopped"), false);
+  assert.equal(events.filter((event) => event === "track stopped").length, 1);
   tap();
   activate();
   await started;
-  assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(events.filter((event) => event === "permission").length, 2);
   assert.equal(mic.diagnostics().receivedChunks, 1);
   assert.equal(timers.size, 0);
   await mic.stop();
@@ -347,6 +354,26 @@ test("activation requiring a connected graph succeeds on the first Start", async
   assert.equal(mic.diagnostics().startCount, 1);
   assert.equal(mic.diagnostics().activationResets, 0);
   assert.equal(events.filter((event) => event === "permission").length, 1);
+  assert.equal(mic.diagnostics().receivedChunks, 1);
+  assert.equal(timers.size, 0);
+  await mic.stop();
+});
+
+test("a permanently stalled first engine is replaced before asking for another tap", async () => {
+  const { mic, timers, events, contexts } = setup({
+    activationNeedsFreshContext: true,
+  });
+  let prompts = 0;
+  const started = mic.start("", ignore, ignore, ignore, () => {
+    prompts++;
+    return new Promise<void>(() => {});
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  [...timers].forEach((callback) => callback());
+  await started;
+  assert.equal(contexts(), 2);
+  assert.equal(prompts, 0);
+  assert.equal(events.filter((event) => event === "close").length, 1);
   assert.equal(mic.diagnostics().receivedChunks, 1);
   assert.equal(timers.size, 0);
   await mic.stop();

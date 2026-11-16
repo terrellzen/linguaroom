@@ -169,13 +169,14 @@ export function microphoneTest(
         stop();
       });
   };
-  process.onclick = () => {
+  const startProcessing = (retry = false) => {
     if (!stream || !active) return;
     process.disabled = true;
     const run = generation;
     try {
       // This new gesture happens with an already-granted, live input.
       context = new AudioContext();
+      const engine = context;
       results.contextStateBeforeResume = context.state;
       results.processingTapActive = navigator.userActivation?.isActive;
       const resuming = context.resume();
@@ -194,25 +195,53 @@ export function microphoneTest(
         );
         meter.value = Math.min(1, rms * 5);
         results.peakLevel = Math.max(Number(results.peakLevel), rms);
+        if (
+          rms > 0 &&
+          results.stage !== "Microphone test detected audio samples."
+        )
+          status("Microphone test detected audio samples.");
         display();
       }, 100);
       context.onstatechange = display;
       status("Starting audio processing from your tap…");
       activationDeadline = setTimeout(() => {
-        if (generation === run)
+        if (generation !== run || context !== engine) return;
+        if (retry) {
           status(
-            "Microphone opened, but audio engine activation is still pending. Copy the test results.",
+            "Audio engine is still suspended after replacement. Copy the test results.",
           );
-      }, 8000);
+          return;
+        }
+        results.firstEngine = {
+          state: engine.state,
+          audioTimeSeconds: engine.currentTime,
+        };
+        results.activationResets = 1;
+        status("Replacing stalled audio engine…");
+        clearInterval(interval);
+        engine.onstatechange = null;
+        context = undefined;
+        // Bound cleanup even if Firefox never settles its native close promise.
+        let timeout: ReturnType<typeof setTimeout>;
+        void Promise.race([
+          engine.close().catch(() => {}),
+          new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, 2000);
+          }),
+        ]).then(() => {
+          clearTimeout(timeout);
+          if (generation === run) startProcessing(true);
+        });
+      }, 3000);
       void resuming.then(
         () => {
-          if (generation === run) {
+          if (generation === run && context === engine) {
             clearTimeout(activationDeadline);
-            status("Audio engine running. Speak and check the input level.");
+            status("Audio engine running. Speak to check for audio samples.");
           }
         },
         (error: unknown) => {
-          if (generation === run) {
+          if (generation === run && context === engine) {
             clearTimeout(activationDeadline);
             results.error = String(error);
             status("Audio processing failed. See results below.");
@@ -224,6 +253,7 @@ export function microphoneTest(
       status("Audio processing failed. See results below.");
     }
   };
+  process.onclick = () => startProcessing();
   find<HTMLButtonElement>("[data-copy]").onclick = () => {
     void navigator.clipboard.writeText(JSON.stringify(results, null, 2)).then(
       () => {

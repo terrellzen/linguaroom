@@ -64,7 +64,7 @@ export class Microphone {
             onInterrupt,
             progress,
             attempt === 0 ? 3000 : 20000,
-            requestActivation,
+            attempt === 0 ? undefined : requestActivation,
           );
           return;
         } catch (error) {
@@ -73,15 +73,9 @@ export class Microphone {
             throw error;
           this.activationResets++;
           progress("Resetting stalled microphone audio…");
-          // A repeat resume alone is insufficient on some Android devices.
-          // Reproduce the useful part of failed-start cleanup before acquiring
-          // a fresh input. No provider connection has been opened yet.
-          if (this.context && this.context.state !== "closed")
-            await withTimeout(
-              this.context.suspend(),
-              "Audio reset timed out.",
-              2000,
-            );
+          // A suspended engine with an unresolved resume is unhealthy. Retire it
+          // instead of carrying pending native operations into another attempt.
+          await this.dispose();
         }
       }
     } finally {

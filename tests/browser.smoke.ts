@@ -152,27 +152,14 @@ try {
     permissions: firefoxTest ? [] : ["microphone"],
     viewport: { width: 390, height: 844 },
   });
-  // The working Termux sequence must also hold in the direct Pages path.
+  // Exercise standalone capture with a stalled native audio engine.
   await standaloneContext.addInitScript(() => {
     const stats = window as typeof window & { audioContextCount: number };
     stats.audioContextCount = 0;
-    // Simulate activation requiring a fresh trusted tap after permission.
+    // Simulate a stalled native engine that only recovers after it is closed.
     // This checks the recovery flow, not the actual Android audio backend.
     let captureGranted = false;
     let needsReset = true;
-    document.addEventListener(
-      "click",
-      (event) => {
-        if (
-          event.isTrusted &&
-          ["Activate audio", "2. Test audio processing"].includes(
-            (event.target as HTMLElement)?.textContent ?? "",
-          )
-        )
-          needsReset = false;
-      },
-      true,
-    );
     const getUserMedia = navigator.mediaDevices.getUserMedia.bind(
       navigator.mediaDevices,
     );
@@ -194,6 +181,10 @@ try {
       resume() {
         if (!captureGranted || needsReset) return new Promise<void>(() => {});
         return super.resume();
+      }
+      close() {
+        needsReset = false;
+        return super.close();
       }
       constructor(...options: ConstructorParameters<typeof AudioContext>) {
         super(...options);
@@ -333,7 +324,7 @@ try {
       .getByRole("button", { name: "2. Test audio processing", exact: true })
       .click();
     await device
-      .getByText("Audio engine running. Speak and check the input level.", {
+      .getByText("Microphone test detected audio samples.", {
         exact: true,
       })
       .waitFor();
@@ -370,9 +361,6 @@ try {
   await device.locator(".close-settings").click();
   await device.locator("#start").click();
   await device
-    .getByRole("button", { name: "Activate audio", exact: true })
-    .click();
-  await device
     .getByText("Microphone connected. Waiting for Soniox to process audio…", {
       exact: true,
     })
@@ -392,7 +380,7 @@ try {
     (await device.locator("#diagnostics").textContent()) ?? "{}",
   );
   assert.ok(diagnostics.capture.receivedChunks > 0);
-  assert.equal(diagnostics.capture.activationResets, 0);
+  assert.equal(diagnostics.capture.activationResets, 1);
   assert.equal(diagnostics.capture.startCount, 1);
   assert.ok(diagnostics.provider.audioBytesSent > 0);
   assert.equal(diagnostics.provider.processedAudioMs, 1000);
@@ -520,9 +508,6 @@ try {
     if (reload) await device.reload();
     await device.locator("#start").click();
     await device
-      .getByRole("button", { name: "Activate audio", exact: true })
-      .click();
-    await device
       .getByText("Meeting live. Audio is being processed by Soniox.", {
         exact: true,
       })
@@ -533,8 +518,8 @@ try {
     );
     assert.equal(
       recovered.capture.activationResets,
-      0,
-      "The activation tap must preserve the granted input without a reset",
+      recovered.capture.startCount,
+      "Each stalled native engine must be replaced automatically",
     );
     assert.equal(
       await device.evaluate(
@@ -542,8 +527,8 @@ try {
           (window as typeof window & { audioContextCount: number })
             .audioContextCount,
       ),
-      1,
-      "All meetings in a page must share one audio engine",
+      recovered.capture.startCount + 1,
+      "Only stalled engines should be replaced",
     );
     await device.locator("#stop").click();
     await device
@@ -563,7 +548,7 @@ try {
   assert.deepEqual(standaloneErrors, []);
   await standaloneContext.close();
   console.log(
-    "Standalone smoke passed: activation deliberately stalled until a trusted activation tap, recovery without reacquiring input, PCM startup order, processing confirmation, pause/resume, ten same-page restarts on one context and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
+    "Standalone smoke passed: activation deliberately stalled until engine close, automatic recovery with a fresh engine, PCM startup order, processing confirmation, pause/resume, ten same-page restarts and reload, direct mocked Soniox, remembered key/removal, local export, no backend calls, mobile/landscape/desktop viewport fit.",
   );
 } finally {
   await browser.close();
